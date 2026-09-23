@@ -1,0 +1,1 @@
+INSERT INTO task_types (name, service) VALUES ('welcome_email', 'EMAIL');

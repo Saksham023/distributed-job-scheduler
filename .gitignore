@@ -1,0 +1,17 @@
+# IDE settings (personal, machine-specific)
+.idea/
+*.iml
+.vscode/
+
+# macOS folder metadata
+.DS_Store
+
+# Build output
+target/
+
+# Local environment overrides and secrets: never commit these
+.env
+.env.*
+application-local.properties
+*.pem
+*.key

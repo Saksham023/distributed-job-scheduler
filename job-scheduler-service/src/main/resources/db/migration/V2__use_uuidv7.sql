@@ -1,0 +1,2 @@
+ALTER TABLE jobs ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE job_executions ALTER COLUMN id SET DEFAULT uuidv7();
