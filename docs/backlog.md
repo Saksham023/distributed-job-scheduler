@@ -1,8 +1,12 @@
 # Backlog
 
-Everything deliberately deferred, in one place. Add an item whenever something
-is postponed; remove it when it's done. Design reasoning lives in
-`schema.md` / `infrastructure.md`; this file is the to-do list.
+Everything still to do, in one place. Add an item whenever something is
+postponed; mark it `[x]` when done. Design reasoning lives in `schema.md` /
+`infrastructure.md`; this file is the to-do list.
+
+**Where things stand (2026-09-24):** v1 (one-time email jobs) is built and
+passes the full end-to-end test plan. Next: the two major items below, then
+the smaller groups.
 
 ## v1: one-time jobs (done)
 
@@ -27,35 +31,62 @@ is postponed; remove it when it's done. Design reasoning lives in
 - [ ] `TaskService` enum once code reads `task_types.service` (e.g. when a
       second channel like SMS arrives).
 
-## Recurring jobs (post-v1)
+## Next major item 1: recurring jobs
 
-- [ ] API: optional `cronExpression` on `CreateJobRequest`; its presence means
-      `RECURRING` (backward compatible, no change for existing clients).
+Schema already exists (`recurring_schedules`: `cron_expression`, `starts_at`,
+`ends_at`, `max_occurrences`, `generated_until`); design in `schema.md`
+("Status lifecycle" covers who completes a recurring job). Start by settling
+the open decisions, then build.
+
+Open decisions:
+- [ ] Cron parsing library (must support arbitrary cron syntax and time
+      zones).
+- [ ] Template pinning for recurring jobs: keep the version the job was
+      created with for its whole lifetime, or move to newer versions?
+- [ ] Generator lookahead window (e.g. keep 1 day of executions generated) and
+      how often it runs.
+
+Build:
+- [ ] API: optional `cronExpression` (+ `startsAt`, `endsAt`,
+      `maxOccurrences`, `timezone`) on `CreateJobRequest`; its presence means
+      `RECURRING`. Backward compatible for existing clients.
 - [ ] `JobService.createJob`: replace the hardcoded `ScheduleType.ONE_TIME`
       with a `switch` on the schedule type; add
       `JobRepository.insertRecurringSchedule`; compute the first execution
       from the cron expression.
-- [ ] Choose a cron parsing library.
-- [ ] Add a `timezone` column to `recurring_schedules` ("9am daily" needs a
-      zone; use `ZonedDateTime` for the calculation).
-- [ ] Generator: tops up `job_executions` within a lookahead window, advances
-      `generated_until`, flips `jobs.status` to `COMPLETED` when the schedule
-      is exhausted and the last execution is terminal.
+- [ ] Migration: `timezone` column on `recurring_schedules` ("9am daily" needs
+      a zone; compute with `ZonedDateTime`).
+- [ ] Generator (a scheduled task, likely its own profile/process like the
+      watcher): tops up `job_executions` within its lookahead window, advances
+      `generated_until` (the `UNIQUE (job_id, scheduled_at)` constraint makes
+      re-runs idempotent), and flips `jobs.status` to `COMPLETED` when the
+      schedule is exhausted and the last execution is terminal. The worker
+      must not complete recurring jobs (it already only completes `ONE_TIME`).
 - [ ] `GET /jobs/{id}/executions` (a recurring job has many executions).
 - [ ] Give `@Scheduled` tasks their own thread pool
-      (`spring.task.scheduling.pool.size`) when the generator is added: by
-      default all scheduled tasks share one thread, so a long watcher drain
-      would delay the generator.
-- [ ] Move to a multi-module Maven project in this same repo: `common`,
-      `api-service`, `watcher-service`, `worker-service`. Each service is its
-      own Spring Boot app and Docker image; `common` is a library packed into
-      each JAR at build time (never deployed alone). `common` holds only
-      what's genuinely shared: the SQS message contract
+      (`spring.task.scheduling.pool.size`) if the generator shares a process
+      with the watcher: by default all scheduled tasks share one thread.
+- [ ] Extend `docs/test-plan.md` with recurring-job phases.
+
+## Next major item 2: multi-module Maven project
+
+- [ ] Restructure this repo into a parent `pom.xml` with modules `common`,
+      `api-service`, `watcher-service`, `worker-service` (and later the
+      generator). Each service is its own Spring Boot app and Docker image;
+      `common` is a library packed into each JAR at build time, never
+      deployed alone.
+- [ ] `common` holds only what's genuinely shared: the SQS message contract
       (`JobExecutionMessage`), SQS config, status enums, table shapes.
-      Service-specific queries and logic stay in their service. Decide who
-      owns Flyway migrations (API service, or a pipeline step). Until then the
-      watcher runs from the same codebase in its own process via
-      `app.watcher.enabled` / the `watcher` Spring profile (Option C).
+      Service-specific queries and logic stay in their service (the watcher's
+      batch query, the worker's claim).
+- [ ] Decide who owns Flyway migrations (the API service, or a separate
+      pipeline step) and turn Flyway off in the others.
+- [ ] Remove the role switches (`app.watcher.enabled`, `app.worker.enabled`,
+      the `watcher`/`worker` profiles): each service contains only its own
+      code.
+- [ ] Keep the message format backward compatible across services (add
+      fields, never rename/remove), since old and new versions run side by
+      side during deploys.
 
 ## Templates
 
@@ -112,8 +143,5 @@ is postponed; remove it when it's done. Design reasoning lives in
 
 ## Code quality
 
-- [x] One shared lookahead (`app.watcher.lookahead`) used by both the `POST`
-      fast path and the watcher.
 - [ ] Inject a `java.time.Clock` instead of calling `now()` directly, so
       time-dependent logic (delay calculation, "due soon") is testable.
-- [x] Root `.gitignore`; first commits pushed to GitHub.

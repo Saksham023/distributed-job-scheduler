@@ -156,7 +156,8 @@ Settings still worth deciding explicitly:
   higher throughput; FIFO adds ordering + built-in dedup per message group
   but caps throughput (much higher with batching). Nothing here needs strict
   ordering across executions, and we're already handling dedup ourselves via
-  the status check above — **lean standard**.
+  the worker's claim — **standard (decided; `job-executions` was created as
+  a Standard queue)**.
 - **Visibility timeout** — must exceed worst-case job processing time, or
   SQS will redeliver a message to a second worker while the first is still
   legitimately working on it (a false-positive "crash"). For jobs with

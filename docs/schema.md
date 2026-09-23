@@ -206,7 +206,7 @@ Scoped out deliberately, not forgotten (tracked in `docs/backlog.md`):
   happens to already-generated `job_executions` when a job is cancelled
   mid-flight.
 
-## Open / not yet decided
+## Open decisions
 
-- `cron_expression` parsing library (needs to support arbitrary cron syntax,
-  not just fixed intervals) — not yet chosen.
+Tracked in [`backlog.md`](backlog.md) → "Next major item 1: recurring jobs"
+(cron library, template pinning for recurring jobs, generator lookahead).
