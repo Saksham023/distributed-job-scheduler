@@ -286,6 +286,15 @@ created per environment via `app.email.provider` (`@ConditionalOnProperty`):
 No default provider (`matchIfMissing` not used): a missing or misspelled
 `app.email.provider` fails startup instead of silently sending nothing.
 
+**SMTP timeouts** (`application-worker.properties`): connect 5s, read 10s,
+write 10s. Spring's mail client has none by default, so a mail server that
+accepts the connection and then hangs would block a worker thread forever:
+each hang permanently takes one of the listener's concurrent slots, and after
+the 60s visibility timeout the message is redelivered while the first thread
+is still stuck (possible duplicate). The timeouts turn a hang into an ordinary
+transient failure, well within the visibility timeout. General rule: every
+network call needs a timeout.
+
 ## Postgres (local dev)
 
 Docker Compose setup lives in [`docker/postgres/`](../docker/postgres/),
