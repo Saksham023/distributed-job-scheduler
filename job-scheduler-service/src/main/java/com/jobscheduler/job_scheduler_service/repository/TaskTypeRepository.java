@@ -1,5 +1,6 @@
 package com.jobscheduler.job_scheduler_service.repository;
 
+import com.jobscheduler.job_scheduler_service.model.TaskTypeTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
@@ -14,10 +15,18 @@ public class TaskTypeRepository {
         this.jdbcClient = jdbcClient;
     }
 
-    public Optional<Integer> findIdByName(String name) {
-        return jdbcClient.sql("SELECT id FROM task_types WHERE name = :name")
+    public Optional<TaskTypeTemplate> findWithActiveTemplate(String name) {
+        return jdbcClient.sql("""
+                        SELECT tt.id AS task_type_id,
+                               t.id AS template_id,
+                               t.params_schema
+                        FROM task_types tt
+                        LEFT JOIN templates t
+                               ON t.task_type_id = tt.id AND t.is_active
+                        WHERE tt.name = :name
+                        """)
                 .param("name", name)
-                .query(Integer.class)
+                .query(TaskTypeTemplate.class)
                 .optional();
     }
 }

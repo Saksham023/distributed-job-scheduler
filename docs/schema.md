@@ -18,6 +18,13 @@ init-script mechanism (runs only once on an empty database, so later changes
 never reach existing databases) and over Liquibase (also standard, but
 XML/YAML changelogs; Flyway's plain SQL matches the hand-written-SQL approach).
 
+**`spring.flyway.placeholder-replacement=false`**: Flyway normally replaces
+`${name}` in migrations with configured values. We don't use that feature,
+and migrations that carry template content (HTML, JSON Schema) can contain
+`${` (e.g. a dollar-quote tag followed by `{`), which Flyway would reject as
+an undefined placeholder. Test migrations by running them through Flyway, not
+only `psql`: `psql` doesn't do placeholder replacement.
+
 ## Tables
 
 - **`users`** — owns jobs. Kept minimal (no auth) since this project isn't
@@ -27,13 +34,15 @@ XML/YAML changelogs; Flyway's plain SQL matches the hand-written-SQL approach).
   `reminder_email`, ...; a `service` column anticipates future non-email
   channels like SMS/push). A real lookup table because this list is
   genuinely open-ended and carries attached metadata (templates reference it).
-- **`templates`** — the content per task type. Versioned, with `is_active`
-  marking which version is currently used; supports swapping content without
-  touching jobs or job_executions. Placeholders (e.g. `{{first_name}}`) are
-  filled at send time from `jobs.params`.
+- **`templates`** — the content per task type: an HTML `body`, a plain-text
+  `subject`, and a `params_schema` (JSON Schema) listing the `params` a job
+  must supply. Versioned: a change is a **new row** (next `version`,
+  `is_active`), never an edit of an existing one. See "Templates and `params`
+  validation" below.
 - **`jobs`** — the request itself: owner, task type, `params` (JSONB —
-  recipient, subject, template variables, whatever the task type needs), and
-  `schedule_type`. Deliberately does **not** hold `recipient` as its own
+  recipient, template variables, whatever the task type needs),
+  `schedule_type`, and `template_id` (the exact template version the job was
+  validated against). Deliberately does **not** hold `recipient` as its own
   column — folded into `params` since it's just more template-rendering
   data, not something that needs its own indexable column at this scale.
 - **`one_time_schedules`** / **`recurring_schedules`** — schedule details
@@ -91,6 +100,61 @@ XML/YAML changelogs; Flyway's plain SQL matches the hand-written-SQL approach).
   every writer (app, future services, manual `psql`) gets correct IDs; the
   app reads them back via `INSERT ... RETURNING id`.
 
+## Templates and `params` validation
+
+- **Body is HTML, subject is plain text.** Rendered with **Mustache**
+  (JMustache) in the worker, not with hand-written string replacement, which
+  would need its own HTML escaping, would re-substitute inside inserted values
+  (a `first_name` of `{{to}}`), and can't do optional sections. Mustache
+  escapes `{{x}}` in HTML by default (client values can't inject links/markup;
+  `{{{x}}}`, unescaped, is never used for client data), fails on a missing
+  `{{x}}` by default, and omits an optional `{{#x}}…{{/x}}` section when `x` is
+  absent. The subject is rendered with HTML escaping **off** (it isn't HTML).
+  Chosen over Thymeleaf (built for web pages, heavier) and FreeMarker (allows
+  much more logic in templates than we want).
+- **Required `params` are declared, not inferred**: each template version has
+  a `params_schema` in **JSON Schema**, the industry standard for describing
+  valid JSON (used by OpenAPI, Kubernetes CRDs, Confluent Schema Registry). A
+  per-task-type Java DTO isn't possible: task types are data (rows added
+  without a deployment), so their parameter rules must be data too. The
+  schema covers more than placeholders: `to` (required, email format) is never
+  in the template text; optional fields and types are expressed too.
+  Declared rather than parsed from the template on every `POST`.
+- **`POST /jobs`**: load the task type's active template → validate `params`
+  against its `params_schema` → `400` listing the failing fields → save the
+  job with `template_id`. The template text is not parsed at `POST`.
+- **Template version pinned on the job** (`jobs.template_id`). A job is
+  validated against today's template but may run next week; if the template
+  changed in between (e.g. a new required placeholder), using the new version
+  would fail a job that was valid when accepted. The worker loads the template
+  by `jobs.template_id`, never "whichever is active now". For recurring jobs
+  (later) pinning means content never updates for the job's lifetime:
+  revisit then.
+- **Safety net in the worker**: rendering is strict, so a placeholder missing
+  from `params` (e.g. schema and template out of sync) makes the execution a
+  **permanent** failure (`FAILED`), never a half-filled email.
+- **Welcome email v1 `params`**: `to` (required, email), `first_name`
+  (required, non-empty), `company_name` (optional; an optional section in the
+  template).
+- No client-supplied `from`: the sender is always `app.email.from`.
+- **Unknown `params` are ignored**, not rejected: only the declared, required
+  fields must be present (`additionalProperties` left open). Trade-off: a
+  misspelled *optional* field is silently ignored.
+- **Exactly one active template per task type**, enforced by a partial unique
+  index (`task_type_id` WHERE `is_active`), plus `UNIQUE (task_type_id,
+  version)`. New jobs always get the active version; existing jobs keep the
+  (possibly inactive) version they were accepted with.
+- **Versions are never edited** (convention: templates only arrive through
+  reviewed migrations). A trigger could enforce it later.
+- **No active template for a task type at `POST` → `500`** (our
+  misconfiguration, not the client's), logged.
+- **Schema violations → `400`** in the same `errors` list (`field`,
+  `message`) as the DTO validation errors.
+- **`jobs.template_id` added with expand → backfill → contract**: add the
+  column nullable, fill existing rows with their task type's active template,
+  then set `NOT NULL`. The migration must work on a database that already has
+  rows, not only an empty one.
+
 ## Status lifecycle
 
 Fixed-list values (`schedule_type`, `jobs.status`, `job_executions.status`,
@@ -101,14 +165,19 @@ Fixed-list values (`schedule_type`, `jobs.status`, `job_executions.status`,
 `enum.name()` when writing. Lowercase names below are prose, not stored values.
 
 **`job_executions.status`**: `pending` → `queued` (SQS push confirmed) →
-`processing` (worker claim — see `docs/infrastructure.md`) → `completed` /
-`failed`. A retry does **not** go back to `pending`/`queued` — it stays at
-`processing` through redeliveries, `attempt` incrementing each time, until
-it either completes or (not yet built) reaches the DLQ.
+`processing` (worker claim — see `docs/infrastructure.md` → "Worker") →
+`completed`, or `failed` (permanent error, or transient error on the last
+attempt). A transient failure sets it back to `queued` with `error_message`
+while SQS redelivers; `attempt` increments on every claim. A worker that
+receives a message whose execution is `processing` never executes it: it
+resets it to `queued` (only `WHERE status = 'PROCESSING'`) and leaves the
+message for redelivery. `processing` therefore always means "a worker has it
+right now (or crashed mid-way)".
 
-**`jobs.status`**: `active` (default) → `completed`. Who flips it to
-`completed`, decided per schedule type since the two cases aren't
-symmetric:
+**`jobs.status`**: `active` (default) → `completed` or `failed`. For a one-time
+job it mirrors its single execution's terminal outcome (`failed` added to
+`jobs.status` for this). Who flips it, decided per schedule type since the
+two cases aren't symmetric:
 - **One-time**: the worker does it directly, in the same transaction as
   marking the single `job_executions` row `completed` — trivial, since a
   one-time job has exactly one execution ever, no ambiguity.
@@ -125,23 +194,17 @@ symmetric:
   yet, it just skips and re-checks next run — idempotent, no new component
   needed.
 
-**`failed` is currently unreachable** — nothing in the v1 design sets it.
-The intended meaning, once built: `job_executions.status = 'failed'` is set
-by the (not-yet-built) DLQ consumer when a message exhausts
-`maxReceiveCount` and lands in the DLQ — i.e. `failed` means "gave up after
-repeated attempts, needs human inspection," not "a single attempt errored."
+**`failed` means "gave up"**, not "one attempt errored": set by the worker
+for a permanent error, or for a transient error on the last allowed attempt
+(the message then goes to the DLQ for human inspection).
 
 ## Deferred — real-system features, not needed for learning
 
-Scoped out deliberately, not forgotten:
+Scoped out deliberately, not forgotten (tracked in `docs/backlog.md`):
 - **Pause/cancel a job.** `jobs.status` reserves `paused`/`cancelled`, but
   there's no API or logic behind them yet, and no defined behavior for what
   happens to already-generated `job_executions` when a job is cancelled
   mid-flight.
-- **DLQ consumer** — see `docs/infrastructure.md`. Needed to make `failed`
-  actually reachable.
-- **Redis distributed lock** for the worker claim race — see
-  `docs/infrastructure.md`, planned for the post-v1 hardening pass.
 
 ## Open / not yet decided
 

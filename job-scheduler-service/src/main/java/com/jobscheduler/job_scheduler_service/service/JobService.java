@@ -3,14 +3,18 @@ package com.jobscheduler.job_scheduler_service.service;
 import com.jobscheduler.job_scheduler_service.config.WatcherProperties;
 import com.jobscheduler.job_scheduler_service.dto.CreateJobRequest;
 import com.jobscheduler.job_scheduler_service.dto.JobResponse;
+import com.jobscheduler.job_scheduler_service.exception.FieldViolation;
 import com.jobscheduler.job_scheduler_service.exception.InvalidRequestException;
+import com.jobscheduler.job_scheduler_service.exception.ParamsValidationException;
 import com.jobscheduler.job_scheduler_service.exception.ResourceNotFoundException;
 import com.jobscheduler.job_scheduler_service.messaging.JobExecutionPublisher;
 import com.jobscheduler.job_scheduler_service.model.JobDetails;
 import com.jobscheduler.job_scheduler_service.model.ScheduleType;
+import com.jobscheduler.job_scheduler_service.model.TaskTypeTemplate;
 import com.jobscheduler.job_scheduler_service.repository.JobExecutionRepository;
 import com.jobscheduler.job_scheduler_service.repository.JobRepository;
 import com.jobscheduler.job_scheduler_service.repository.TaskTypeRepository;
+import com.jobscheduler.job_scheduler_service.template.ParamsValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -19,6 +23,7 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -35,6 +40,7 @@ public class JobService {
     private final TransactionTemplate transactionTemplate;
     private final JsonMapper jsonMapper;
     private final WatcherProperties watcherProperties;
+    private final ParamsValidator paramsValidator;
 
     public JobService(JobRepository jobRepository,
                       JobExecutionRepository jobExecutionRepository,
@@ -42,7 +48,8 @@ public class JobService {
                       JobExecutionPublisher publisher,
                       TransactionTemplate transactionTemplate,
                       JsonMapper jsonMapper,
-                      WatcherProperties watcherProperties) {
+                      WatcherProperties watcherProperties,
+                      ParamsValidator paramsValidator) {
         this.jobRepository = jobRepository;
         this.jobExecutionRepository = jobExecutionRepository;
         this.taskTypeRepository = taskTypeRepository;
@@ -50,15 +57,27 @@ public class JobService {
         this.transactionTemplate = transactionTemplate;
         this.jsonMapper = jsonMapper;
         this.watcherProperties = watcherProperties;
+        this.paramsValidator = paramsValidator;
     }
 
     public JobResponse createJob(CreateJobRequest request) {
-        int taskTypeId = taskTypeRepository.findIdByName(request.taskType())
+        TaskTypeTemplate taskType = taskTypeRepository.findWithActiveTemplate(request.taskType())
                 .orElseThrow(() -> new InvalidRequestException("Unknown task type: " + request.taskType()));
+        if (taskType.templateId() == null) {
+            throw new IllegalStateException("No active template for task type: " + request.taskType());
+        }
+
+        List<FieldViolation> violations =
+                paramsValidator.validate(taskType.templateId(), taskType.paramsSchema(), request.params());
+        if (!violations.isEmpty()) {
+            throw new ParamsValidationException(violations);
+        }
+
         String paramsJson = jsonMapper.writeValueAsString(request.params());
 
         CreatedJob created = transactionTemplate.execute(status -> {
-            UUID jobId = jobRepository.insert(request.userId(), taskTypeId, paramsJson, ScheduleType.ONE_TIME);
+            UUID jobId = jobRepository.insert(request.userId(), taskType.taskTypeId(), taskType.templateId(),
+                    paramsJson, ScheduleType.ONE_TIME);
             jobRepository.insertOneTimeSchedule(jobId, request.scheduledAt());
             UUID executionId = jobExecutionRepository.insert(jobId, request.scheduledAt());
             return new CreatedJob(jobId, executionId);

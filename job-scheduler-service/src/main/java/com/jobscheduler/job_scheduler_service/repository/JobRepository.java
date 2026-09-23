@@ -1,6 +1,7 @@
 package com.jobscheduler.job_scheduler_service.repository;
 
 import com.jobscheduler.job_scheduler_service.model.JobDetails;
+import com.jobscheduler.job_scheduler_service.model.JobStatus;
 import com.jobscheduler.job_scheduler_service.model.ScheduleType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -18,14 +19,15 @@ public class JobRepository {
         this.jdbcClient = jdbcClient;
     }
 
-    public UUID insert(long userId, int taskTypeId, String paramsJson, ScheduleType scheduleType) {
+    public UUID insert(long userId, int taskTypeId, int templateId, String paramsJson, ScheduleType scheduleType) {
         return jdbcClient.sql("""
-                        INSERT INTO jobs (user_id, task_type_id, params, schedule_type)
-                        VALUES (:userId, :taskTypeId, CAST(:params AS jsonb), :scheduleType)
+                        INSERT INTO jobs (user_id, task_type_id, template_id, params, schedule_type)
+                        VALUES (:userId, :taskTypeId, :templateId, CAST(:params AS jsonb), :scheduleType)
                         RETURNING id
                         """)
                 .param("userId", userId)
                 .param("taskTypeId", taskTypeId)
+                .param("templateId", templateId)
                 .param("params", paramsJson)
                 .param("scheduleType", scheduleType.name())
                 .query(UUID.class)
@@ -62,5 +64,23 @@ public class JobRepository {
                 .param("id", id)
                 .query(JobDetails.class)
                 .optional();
+    }
+
+    public void markCompleted(UUID id) {
+        jdbcClient.sql("UPDATE jobs SET status = :completed, updated_at = now() WHERE id = :id")
+                .param("id", id)
+                .param("completed", JobStatus.COMPLETED.name())
+                .update();
+    }
+
+    public void markFailed(UUID id) {
+        jdbcClient.sql("""
+                        UPDATE jobs SET status = :failed, updated_at = now()
+                        WHERE id = :id AND status = :active
+                        """)
+                .param("id", id)
+                .param("failed", JobStatus.FAILED.name())
+                .param("active", JobStatus.ACTIVE.name())
+                .update();
     }
 }

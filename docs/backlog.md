@@ -16,12 +16,25 @@ is postponed; remove it when it's done. Design reasoning lives in
 - [x] Watcher: scheduled task that publishes `PENDING` executions due within
       the lookahead window and marks them `QUEUED` (`watcher/ExecutionWatcher`,
       runs in its own process via the `watcher` profile). Verified end to end.
-- [ ] Worker: receive → atomic claim → execute → `COMPLETED` → delete message;
-      flips a one-time job's `jobs.status` to `COMPLETED`. Needs its own IAM
-      identity (receive/delete/change-visibility only).
-- [ ] Decide what "send email" means in v1 (AWS SES vs. logging stand-in).
-- [ ] `welcome_email` template row (worker renders it) and a `TaskService`
-      enum once the worker reads `task_types.service`.
+- [ ] Worker: receive → claim → execute → complete → delete message, with
+      the `PROCESSING` reset and permanent/transient/last-attempt failure
+      handling. Design settled in `infrastructure.md` → "Worker". Needs its own
+      IAM identity (receive/delete/change-visibility only).
+- [ ] SQS console: raise `job-executions` redrive `maxReceiveCount` 3 → 5.
+- [ ] Migration: add `FAILED` to `jobs.status` (+ `JobStatus` enum).
+- [x] "Send email" in v1: `EmailSender` interface; Mailpit locally
+      (`docker/mailpit/`), SES later.
+- [ ] Migration: `templates.params_schema` (JSON Schema), `jobs.template_id`
+      (pinned template version); `welcome_email` v1 template row (HTML body,
+      subject, schema: `to`, `first_name`, optional `company_name`).
+- [ ] `POST /jobs`: validate `params` against the active template's schema
+      (networknt json-schema-validator, Jackson 3) and save `template_id`.
+- [x] Worker rendering with JMustache (strict; subject without HTML escaping):
+      `template/TemplateRenderer`; `SmtpEmailSender` sends HTML. Verified in
+      Mailpit (optional section, HTML escaping, missing value → not sent).
+- [x] Receiving messages: `@SqsListener` (Spring Cloud AWS 4.x) in manual
+      acknowledgement mode (see `infrastructure.md` → "Worker").
+- [ ] `TaskService` enum once the worker reads `task_types.service`.
 - [ ] Integration tests with Testcontainers (real Postgres, runs Flyway).
 
 ## Recurring jobs (post-v1)
@@ -54,6 +67,18 @@ is postponed; remove it when it's done. Design reasoning lives in
       watcher runs from the same codebase in its own process via
       `app.watcher.enabled` / the `watcher` Spring profile (Option C).
 
+## Templates
+
+- [ ] Plain-text alternative alongside the HTML body (some clients prefer it;
+      helps with spam filters).
+- [ ] Automated test: for every template version, every `{{placeholder}}` in
+      subject/body is declared in its `params_schema` (catches schema/template
+      drift once per template, not per request).
+- [ ] Cache the active template per task type in memory (short TTL) if the
+      per-`POST` lookup ever shows up in measurements.
+- [ ] Template management API/admin (templates are inserted via migrations
+      for now).
+
 ## API features
 
 - [ ] `GET /jobs` list endpoint: one join query + pagination (never per-row
@@ -64,12 +89,27 @@ is postponed; remove it when it's done. Design reasoning lives in
 
 ## Failure handling (hardening pass)
 
-- [ ] Redis distributed lock for the worker claim race (design in
-      `infrastructure.md`, v2).
-- [ ] DLQ consumer: set `job_executions.status = 'FAILED'` for messages that
-      exhausted `maxReceiveCount` (currently `FAILED` is unreachable).
+- [ ] DLQ consumer: no longer needed to make `FAILED` reachable (the worker
+      marks `FAILED` on the last attempt); would only matter for messages that
+      reach the DLQ without the worker seeing their last attempt (e.g. a crash
+      on the last attempt).
+- [ ] `SesEmailSender` for real delivery.
+- [ ] Reconcile executions stuck at `QUEUED` whose SQS message no longer
+      exists (queue purged, message outlived the 4-day retention, lost). The
+      watcher only picks up `PENDING`, so such rows are never delivered. Fix:
+      periodically republish `QUEUED` rows older than a threshold (e.g.
+      scheduled more than 15 min ago); the worker's claim makes any resulting
+      duplicate harmless. Found in local testing after purging the queue.
 - [ ] Exponential backoff between retries.
-- [ ] Visibility-timeout heartbeat (`ChangeMessageVisibility`) for long jobs.
+- [ ] Heartbeat for jobs that could exceed 60s: extend the SQS visibility
+      timeout (`ChangeMessageVisibility`) while working.
+- [ ] Optional: Redis lock for the worker, only if duplicate executions prove
+      to be a real problem. Rejected for v1: same guarantee as the DB +
+      visibility-timeout lease, but a second source of truth and a new failure
+      mode. If built: `SET key token NX PX` with TTL = visibility timeout; lock
+      held → leave the message (never delete: it may be the only copy);
+      release in a `finally` via compare-and-delete (Lua); Redis down →
+      transient failure.
 
 ## Security & configuration
 
@@ -83,8 +123,8 @@ is postponed; remove it when it's done. Design reasoning lives in
 
 ## Code quality
 
-- [ ] Make the 5-minute window one shared property used by both the
-      `POST` fast path (`JobService.FAST_PATH_WINDOW`) and the watcher.
+- [x] One shared lookahead (`app.watcher.lookahead`) used by both the `POST`
+      fast path and the watcher.
 - [ ] Inject a `java.time.Clock` instead of calling `now()` directly, so
       time-dependent logic (delay calculation, "due soon") is testable.
-- [ ] Root `.gitignore` with `.idea/`; first commit.
+- [x] Root `.gitignore`; first commits pushed to GitHub.

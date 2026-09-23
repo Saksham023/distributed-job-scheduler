@@ -1,0 +1,16 @@
+services:
+  mailpit:
+    image: axllent/mailpit:v1
+    container_name: job-scheduler-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP: the app sends email here
+      - "8025:8025"   # Web UI: http://localhost:8025
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 0   # default 500 silently deletes older emails, which breaks load-test counts
+    volumes:
+      - mailpit-data:/data
+
+volumes:
+  mailpit-data:

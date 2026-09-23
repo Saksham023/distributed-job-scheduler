@@ -4,5 +4,6 @@ public enum JobStatus {
     ACTIVE,
     PAUSED,
     COMPLETED,
+    FAILED,
     CANCELLED
 }

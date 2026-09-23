@@ -9,8 +9,12 @@ single Postgres instance and a straightforward service, for learning purposes.
 ## Planned architecture
 
 - **API** — `POST /jobs` to schedule a job, `GET /jobs/:id` (and `GET /jobs`)
-  to check status. One main service talking to Postgres, no separate
-  services per component.
+  to check status.
+- **One codebase, three processes (for now).** API, watcher and worker live in
+  one Spring Boot project, each role in its own package, and run as separate
+  processes: the `watcher` / `worker` Spring profiles switch the role on
+  (`app.watcher.enabled`, `app.worker.enabled`) and turn off the web server
+  and Flyway. Later: a multi-module Maven project (see backlog).
 - **Generator** — periodic process that tops up `job_executions` rows for
   recurring jobs, staying a lookahead window ahead of `recurring_schedules.generated_until`.
 - **Watcher/poller** — periodic process (e.g. every minute) that selects
@@ -18,6 +22,22 @@ single Postgres instance and a straightforward service, for learning purposes.
 - **Queue + workers** — SQS; workers consume, execute the job, update the
   execution's status. See [`docs/infrastructure.md`](docs/infrastructure.md)
   for the crash/retry/dedup semantics.
+
+## Worker rules (settled; see `docs/infrastructure.md` → "Worker")
+
+- No Redis/distributed lock: coordination is the `job_executions` row plus the
+  SQS visibility timeout (a lease). Delivery is at-least-once.
+- Claim is an atomic allow-list update: `PENDING`/`QUEUED` → `PROCESSING`.
+- Execution found `PROCESSING` → never execute it: reset to `QUEUED`
+  (`WHERE status = 'PROCESSING'`) and leave the message (don't delete) so it
+  reappears after the visibility timeout. Terminal status → delete the message.
+- Marking `COMPLETED` is unconditional; every other update must never
+  overwrite `COMPLETED`.
+- Order: claim → execute → complete (DB commit) → delete the message (ack last).
+- Failures: permanent → `FAILED` + delete; transient → back to `QUEUED`, keep
+  the message; transient on the last attempt → `FAILED`, keep the message (it
+  goes to the DLQ). `maxReceiveCount = 5`, matched by
+  `app.worker.max-receive-count`.
 
 ## Docs
 
@@ -31,14 +51,12 @@ single Postgres instance and a straightforward service, for learning purposes.
 
 ## Build philosophy: happy path first
 
-The schema and SQS design already account for failure modes (statuses on
-`jobs`/`job_executions`, the ack-last ordering, DLQ). But for the first
-working version, **failure handling is deliberately not implemented** — a
-worker dying mid-processing, redelivery, retries, DLQ wiring, and similar
-recovery scenarios are known and documented (see `docs/infrastructure.md`),
-not solved. Get one-time and recurring jobs flowing end-to-end first; come
-back to failure/recovery scenarios as a deliberate later pass once there's a
-working demo, not before.
+Get one-time jobs flowing end-to-end first. Failure handling is designed up
+front and documented, but only the parts settled for v1 are built: the
+watcher's batch/failure rules and the worker's rules above (claim, `PROCESSING`
+reset, permanent/transient/last-attempt failures, ack last). Further hardening
+(heartbeats, backoff, DLQ consumer, optional Redis lock) stays in the backlog
+until there's a working demo.
 
 ## v1 scope
 

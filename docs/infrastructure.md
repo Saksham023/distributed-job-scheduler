@@ -8,99 +8,138 @@ its `scheduled_at` is (bounded by the watcher's 5-minute lookahead, well
 under SQS's 15-minute max delay), so the message only becomes visible to
 workers when it's actually due.
 
-### Worker crash handling — no separate reconciliation sweep needed
+## Worker (executing a message)
 
-SQS's visibility timeout already does the job a "find stuck executions" cron
-would otherwise need to do: a worker that crashes mid-job never deletes the
-message, so after the visibility timeout expires SQS redelivers it to
-another worker automatically.
+SQS's visibility timeout does the job a "find stuck executions" cron would
+otherwise do: a worker that crashes never deletes its message, so SQS
+redelivers it after the timeout. Delivery is **at-least-once**; duplicates
+are made rare, not impossible.
 
-Required ordering for this to be safe — **ack (delete the SQS message) last**:
+Coordination between workers uses only the `job_executions` row and the SQS
+visibility timeout, effectively a **lease**: a worker holds an execution for
+as long as its message is invisible (60s); not finished by then → presumed
+dead. (A Redis lock was designed and rejected: same guarantee, same
+"presumed dead after 60s" assumption, but a second source of truth and a new
+failure mode. See backlog.)
 
-1. Claim the execution (see below), set `started_at = now()`
-2. Do the actual work (send the email)
-3. Set `status = 'COMPLETED'` / `'FAILED'` (+ `error_message`), `finished_at = now()`
-4. Only then delete the SQS message
+### What the worker does for each execution status
 
-This means at-least-once execution, not exactly-once — accepted trade-off,
-not a bug to fix.
+| Status on receipt | Meaning | Action |
+|---|---|---|
+| `QUEUED` | Normal case, or waiting for a retry after a transient failure | Execute |
+| `PENDING` | Publisher crashed after sending, before marking `QUEUED` | Execute |
+| `PROCESSING` | Another worker has it right now, **or** its worker crashed; can't tell which | Reset to `QUEUED`, leave the message (don't delete) |
+| `COMPLETED` / `FAILED` / `CANCELLED` | Terminal; this message is a leftover | Delete the message, do nothing |
 
-### Claiming an execution (POST fast-path can leave a row at `pending`)
+`PROCESSING` is never executed directly. Resetting it and leaving the message
+answers "is someone working on this?" by waiting and looking again: the
+message reappears after the visibility timeout, and by then either the other
+worker finished (row `COMPLETED` → message deleted) or it crashed (row still
+`QUEUED` → executed).
 
-Whoever pushes to SQS (the `POST /jobs` fast path or the watcher) is
-responsible for flipping `job_executions.status` to `'queued'` right after a
-successful send. In the ordinary case a worker only ever sees `'queued'`.
-But if the pusher crashes after the send succeeds and before that DB update
-commits, the message is genuinely in the queue while the row still says
-`'pending'` — a worker must treat that the same as `'queued'`, not as an
-error state.
+A `PENDING` row does **not** guarantee a second message: if a worker claims it
+before the watcher's next run, the watcher never republishes it. Nothing may
+depend on a second message arriving.
 
-**v1 claim query** (a single atomic conditional update, not a separate
-read-then-write — the read-then-write version has a race where two workers
-can both pass a status check before either writes):
+### The status updates
+
+**Claim**: one atomic conditional update (never read-then-write, which would
+let two workers both pass the check), committed in its own short transaction:
 
 ```sql
 UPDATE job_executions
 SET status = 'PROCESSING', started_at = now(), attempt = attempt + 1
-WHERE id = ?
-  AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-RETURNING *;
+WHERE id = :id AND status IN ('PENDING', 'QUEUED')
+RETURNING ...
 ```
 
-Zero rows returned → this message is a stray/terminal duplicate → delete it
-from SQS and stop, no work done. A row returned → this worker owns it → do
-the work.
+An **allow-list** (`IN` the claimable statuses), not a deny-list (`NOT IN`
+the terminal ones): if a status is added later (e.g. `PAUSED`) and this query
+isn't updated, the job is safely *not* executed (visibly stuck, fixable)
+instead of wrongly executed (an email that can't be unsent). If no row is
+returned, a follow-up read decides between resetting (`PROCESSING`) and
+deleting the message (terminal or unknown). `attempt` counts claims.
 
-**Known accepted gap in v1:** this query can't distinguish "another worker
-is genuinely still processing this right now" from "the previous claimant
-died" — both look like `status = 'processing'`. Two messages for the same
-`job_execution_id` (possible via the same pusher-crash race above, now
-duplicated) can therefore both pass this claim query if they arrive close
-enough together, causing a real double-send. This is accepted as a known,
-narrow-window risk for v1 — not fixed by a timestamp heuristic (guessed
-staleness thresholds trade a false-steal risk for a false-wait risk, neither
-correctly).
+**Rule: the update that records success is unconditional; every other update
+must never overwrite a success.**
 
-**v2 (planned, not v1 — deliberately not skipped): a Redis distributed
-lock**, keyed by `job_execution_id`, TTL matching the queue's visibility
-timeout (`60s`). A worker must acquire the lock before claiming; failure to
-acquire means another worker verifiably holds it right now (not a guess),
-so the message can be deleted immediately as a confirmed duplicate — the
-lock owner's own message remains in the queue as the retry path if it dies.
-Release must be a compare-and-delete (check a unique per-claim token before
-deleting, e.g. via a small Lua script) rather than a plain `DEL`, otherwise
-a slow worker can delete a lock some other worker has since legitimately
-acquired after the first one's TTL expired. A single Redis instance with
-this pattern is sufficient here — full multi-node Redlock consensus isn't
-needed for what this is protecting. Tracked as the first item to build in
-the post-v1 hardening pass.
+| Update | Condition | Why |
+|---|---|---|
+| Complete → `COMPLETED` | none (`WHERE id = :id`) | The email was sent, so `COMPLETED` is the truth whatever the row said (including after another worker reset it to `QUEUED`) |
+| Reset `PROCESSING` → `QUEUED` | `status = 'PROCESSING'` (compare-and-set) | Must not turn a `COMPLETED` row back into `QUEUED` |
+| Transient failure → `QUEUED` | `status IN ('PROCESSING', 'QUEUED')` | Allow-list: never overwrites `COMPLETED` (another worker's success), `FAILED` or `CANCELLED` |
+| Permanent / last-attempt failure → `FAILED` | `status IN ('PROCESSING', 'QUEUED')`; the one-time job only `WHERE status = 'ACTIVE'` | Same |
 
-### Poison messages — `maxReceiveCount` + DLQ
+### Receiving messages: `@SqsListener` (Spring Cloud AWS 4.x)
 
-A job that reliably crashes every worker that touches it would otherwise
-redeliver forever. SQS's redrive policy handles this natively: after
-`maxReceiveCount` deliveries, SQS routes the message to a dead-letter queue
-instead of redelivering. Config, not application code — set this up on the
-queue from the start.
+The SQS counterpart of `@KafkaListener`; chosen over a hand-written polling
+loop. Spring Cloud AWS 4.x targets Spring Boot 4 and handles long polling,
+batching, concurrency, back-pressure and JSON → `JobExecutionMessage`
+conversion.
 
-`job_executions.attempt` should increment on every pickup (not just on
-failure), so attempt count reflects redelivery visibility even for jobs that
-never fail outright.
+- **Manual acknowledgement mode is required.** The default mode deletes the
+  message whenever the listener method returns normally, which would break
+  the "leave the message" cases (`PROCESSING` reset, transient failure, last
+  attempt). In manual mode the method gets an `Acknowledgement`: calling
+  `acknowledge()` deletes the message; not calling it leaves it to reappear
+  after the visibility timeout (like Spring Kafka's `AckMode.MANUAL`).
+- `ApproximateReceiveCount` is read from the message headers.
+- It uses its own `SqsAsyncClient` (configured via `spring.cloud.aws.*`); our
+  `SqsClient` in `SqsConfig` stays for publishing (API, watcher).
+- The listener must run only in the worker process: disabled for the API and
+  watcher roles by configuration.
 
-**Decided (scoped down for this learning project):** no DLQ consumer. A
-message that lands in the DLQ just sits there for manual inspection — we're
-deliberately not building the small process that would flip the
-corresponding `job_executions` row to `failed` automatically. Known
-consequence: a DLQ'd execution's DB row stays in whatever non-terminal state
-it was last written to (`processing` or `queued`), so `GET /jobs/:id` won't
-reflect the true "gave up after N attempts" outcome — acceptable gap here,
-would need closing in a real system.
+### Steps (ack last)
 
-**Decided:** no custom exponential backoff between retries. Redelivery uses
-the queue's plain visibility timeout every time (SQS doesn't do backoff
-natively) — a failed message just becomes visible again after the same fixed
-timeout, repeatedly, until `maxReceiveCount` sends it to the DLQ. Simpler,
-accepted for now.
+1. **Receive** the message, with its `ApproximateReceiveCount`.
+2. **Claim and load** in one statement (`UPDATE … FROM jobs JOIN templates …
+   RETURNING`): the claim also returns `params` and the **pinned** template
+   (by `jobs.template_id`, not the currently active one). Not claimed → read
+   the status: `PROCESSING` → reset to `QUEUED` and leave the message;
+   terminal/unknown → delete the message. Stop.
+3. (merged into 2)
+4. **Execute**: render subject and body with Mustache (strict; see
+   `schema.md` → "Templates and `params` validation"), send via `EmailSender`.
+   No DB transaction is held during this external call.
+5. **Complete**, in one transaction: execution `COMPLETED` + `finished_at`;
+   the one-time job `COMPLETED`.
+6. **Delete the message** (ack), only after step 5 commits.
+
+| Crash point | Result |
+|---|---|
+| Before the claim commits | Redelivered, executed normally |
+| After claim, before the email is sent | Redelivered → sees `PROCESSING` → reset → redelivered again → executed (one extra minute) |
+| After the email is sent, before step 5 | Eventually executed again → **duplicate email** (accepted at-least-once cost) |
+| After step 5, before the message is deleted | Redelivered → `COMPLETED` → message deleted. No duplicate |
+
+### Failures
+
+- **Permanent** (retrying can't help: template missing, `params` lacks a
+  recipient, invalid address, a placeholder with no value in `params` (strict
+  Mustache rendering)) → execution `FAILED` with `error_message`, one-time job
+  `FAILED`, delete the message.
+- **Transient** (mail server unreachable, network timeout, DB briefly down) →
+  execution back to `QUEUED` with `error_message`; don't delete the message.
+  SQS redelivers it after the visibility timeout. `QUEUED` + an error reads
+  "failed once, waiting for retry".
+- **Transient on the last attempt** (`ApproximateReceiveCount` ≥
+  `app.worker.max-receive-count`) → execution and one-time job `FAILED`;
+  don't delete the message, so SQS moves it to the DLQ for human inspection.
+
+**`maxReceiveCount = 5`** (redrive policy; `app.worker.max-receive-count`
+must match). Raised from 3 because a delivery that only resets `PROCESSING`
+still counts as a receive: with 3, one crash plus one transient failure would
+send a healthy job to `FAILED`.
+
+`jobs.status` gains `FAILED` (migration + `JobStatus` enum): for a one-time
+job it mirrors its single execution's terminal outcome. (For recurring jobs,
+one failed execution won't fail the job.)
+
+No exponential backoff between retries: redelivery uses the plain visibility
+timeout each time (SQS doesn't back off natively). Accepted for now.
+
+Jobs that could exceed 60s would need a heartbeat extending the visibility
+timeout (`ChangeMessageVisibility`): deferred (see backlog).
 
 ### Other SQS configs to decide on (coming from Kafka)
 
@@ -154,7 +193,7 @@ Queues created: `job-executions` (Standard, visibility timeout `60s` — the
 default `30s` was too tight for send-email + two DB writes) and
 `job-executions-dlq` (Standard, retention `14 days`, receive wait time `20s`).
 `job-executions` has its dead-letter queue enabled, pointing at
-`job-executions-dlq`, with **maxReceiveCount = 3**. No DLQ consumer — see
+`job-executions-dlq`, with **maxReceiveCount = 5** (raised from 3; see "Worker" → Failures). No DLQ consumer — see
 "Build philosophy" below; a DLQ'd message just sits there for manual
 inspection.
 
@@ -230,6 +269,22 @@ states later — that's why they're there — but the recovery logic itself
 pass once there's a working demo, not before. Keep documenting failure
 scenarios as they're identified; fix them later, deliberately, not reactively
 mid-build.
+
+## Email
+
+The worker depends on an `EmailSender` interface; one implementation is
+created per environment via `app.email.provider` (`@ConditionalOnProperty`):
+
+- **Local: `smtp` → Mailpit** ([`docker/mailpit/`](../docker/mailpit/)), a fake
+  SMTP server that catches every email (inbox at http://localhost:8025).
+  Chosen over writing emails to files because the app runs the same SMTP
+  sending code locally as against a real server.
+- **Production: `ses`** (AWS SES), added later. UAT options (hosted catcher
+  such as Mailtrap, SES left in sandbox, a recipient allow-list decorator,
+  anonymized data) are noted but out of scope.
+
+No default provider (`matchIfMissing` not used): a missing or misspelled
+`app.email.provider` fails startup instead of silently sending nothing.
 
 ## Postgres (local dev)
 

@@ -34,6 +34,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred.");
     }
 
+    @ExceptionHandler(ParamsValidationException.class)
+    public ProblemDetail handleParamsValidation(ParamsValidationException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Request validation failed.");
+        problem.setProperty("errors", ex.getViolations());
+        return problem;
+    }
+
     @Override
     protected ResponseEntity<Object> handleMethodArgumentNotValid(
             MethodArgumentNotValidException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
@@ -44,6 +51,4 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 .toList());
         return handleExceptionInternal(ex, problem, headers, status, request);
     }
-
-    public record FieldViolation(String field, String message) {}
 }
