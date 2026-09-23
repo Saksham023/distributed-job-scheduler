@@ -47,7 +47,11 @@ single Postgres instance and a straightforward service, for learning purposes.
   `job-scheduler-service/src/main/resources/db/migration/` (`V1__init.sql`, ...);
   the app applies them automatically at startup.
 - [`docs/infrastructure.md`](docs/infrastructure.md) — SQS queue design
-  (ack ordering, idempotency, DLQ) and local Postgres via Docker.
+  (ack ordering, idempotency, DLQ), the watcher and worker, email, and local
+  Postgres/Mailpit via Docker.
+- [`docs/test-plan.md`](docs/test-plan.md) — manual end-to-end test plan
+  (happy path, load, duplicates, failures, crashes, outages) and the results
+  of the last run.
 
 ## Build philosophy: happy path first
 
