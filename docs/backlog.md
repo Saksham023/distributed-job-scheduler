@@ -13,8 +13,9 @@ is postponed; remove it when it's done. Design reasoning lives in
       `ProblemDetail` (RFC 9457); validation failures include an `errors` list.
 - [x] Manual end-to-end test (Postman): job due in 2 min → `QUEUED`; job due
       in 1 h → `PENDING`; 404 / 400 error shapes verified.
-- [ ] Watcher: scheduled task that publishes `PENDING` executions due within
-      the lookahead window and marks them `QUEUED`.
+- [x] Watcher: scheduled task that publishes `PENDING` executions due within
+      the lookahead window and marks them `QUEUED` (`watcher/ExecutionWatcher`,
+      runs in its own process via the `watcher` profile). Verified end to end.
 - [ ] Worker: receive → atomic claim → execute → `COMPLETED` → delete message;
       flips a one-time job's `jobs.status` to `COMPLETED`. Needs its own IAM
       identity (receive/delete/change-visibility only).
@@ -38,6 +39,20 @@ is postponed; remove it when it's done. Design reasoning lives in
       `generated_until`, flips `jobs.status` to `COMPLETED` when the schedule
       is exhausted and the last execution is terminal.
 - [ ] `GET /jobs/{id}/executions` (a recurring job has many executions).
+- [ ] Give `@Scheduled` tasks their own thread pool
+      (`spring.task.scheduling.pool.size`) when the generator is added: by
+      default all scheduled tasks share one thread, so a long watcher drain
+      would delay the generator.
+- [ ] Move to a multi-module Maven project in this same repo: `common`,
+      `api-service`, `watcher-service`, `worker-service`. Each service is its
+      own Spring Boot app and Docker image; `common` is a library packed into
+      each JAR at build time (never deployed alone). `common` holds only
+      what's genuinely shared: the SQS message contract
+      (`JobExecutionMessage`), SQS config, status enums, table shapes.
+      Service-specific queries and logic stay in their service. Decide who
+      owns Flyway migrations (API service, or a pipeline step). Until then the
+      watcher runs from the same codebase in its own process via
+      `app.watcher.enabled` / the `watcher` Spring profile (Option C).
 
 ## API features
 

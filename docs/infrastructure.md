@@ -158,6 +158,66 @@ default `30s` was too tight for send-email + two DB writes) and
 "Build philosophy" below; a DLQ'd message just sits there for manual
 inspection.
 
+## Watcher (publishing due executions)
+
+Runs inside the API service as a Spring `@Scheduled` task (a separate
+deployable was considered and deferred: it would duplicate the repositories
+and SQS setup for no v1 benefit).
+
+**Timing.** `fixedDelay` of 1 minute (the next run starts 1 minute after the
+previous one *finishes*, so runs never overlap) and a 5-minute lookahead.
+Rule: **lookahead must be comfortably longer than the interval** (a job
+should be seen by several runs before it's due, so one failed run doesn't make
+it late), and **at most 15 minutes** (SQS's max `DelaySeconds`). If the
+interval is raised to 3–4 minutes, raise the lookahead too (e.g. 10 min). The
+lookahead is one shared setting, also used by the `POST` fast path.
+
+**Multiple instances: `FOR UPDATE SKIP LOCKED`.** Every API instance runs a
+watcher. Each batch query locks the rows it returns and skips rows locked by
+another instance, so concurrent watchers take disjoint rows. Chosen over
+ShedLock (only one instance does the work) because every instance can share
+the load. Even a "single-instance" watcher needs this: rolling deploys and
+failover briefly run two copies.
+
+**One run:**
+
+1. Loop: in one transaction, select up to 10 due rows (`status = 'PENDING'`
+   and `scheduled_at <= now() + lookahead`), `ORDER BY scheduled_at`,
+   `FOR UPDATE SKIP LOCKED`.
+2. Publish them with one `SendMessageBatch` call (10 = SQS's per-call limit,
+   so each transaction holds its locks for exactly one network call).
+3. Mark the accepted rows `QUEUED`; rejected rows stay `PENDING`; commit.
+4. Stop when the query returns fewer than 10 rows (drained), **or** the SQS
+   call throws (roll back), **or** half or more of the batch was rejected
+   (configurable threshold).
+
+**No `OFFSET` pagination.** Processing a batch moves its rows out of the
+result set (they become `QUEUED`), so the next batch is the same query run
+again ("draining" a queue). `OFFSET` counts positions, and positions shift as
+rows are queued or new rows arrive, so it would skip or repeat rows.
+
+**Failures.** The message body is only `{"jobExecutionId": ...}`, so a
+poison message (one that fails every time) can't occur; any per-message
+failure is a transient SQS-side hiccup. A rejected row stays `PENDING` and,
+being among the earliest by `scheduled_at`, is re-picked by the next batch,
+which is an immediate retry. A real network failure makes the whole call
+throw (after the SDK's own retries with backoff): roll back and stop the run.
+If half or more of a batch is rejected, SQS looks unhealthy: commit the
+accepted rows and stop. The 1-minute delay before the next run is the backoff.
+
+**No per-run cap, and the loop always terminates.** With `fixedDelay` a long
+run is harmless, and a cap would slow backlog recovery (e.g. after hours of
+downtime). Any batch allowed to continue queued more than half its rows, so
+every iteration makes progress; a finite backlog ends in a batch of fewer than
+10 rows, which stops the loop (rows that keep failing end up in that last
+batch and are retried next run). Rough speed: one batch ≈ 20–50 ms, so 100k
+rows ≈ 5–8 minutes on one thread. Each query re-evaluates `now()`, so jobs
+that become due mid-drain are included.
+
+**Accepted race.** A `POST` fast path and a watcher run can both see a brand-new
+row as `PENDING` and due, producing one duplicate message. Rare, and the
+worker's atomic claim makes duplicates harmless (at-least-once delivery).
+
 ## Build philosophy: happy path first
 
 Failure handling (worker crash mid-processing, redelivery races, retries,
@@ -178,7 +238,3 @@ providing an empty database only; the schema is created and upgraded by the
 app's Flyway migrations (see `docs/schema.md`). See that folder's README for
 usage.
 
-## Open / not yet decided
-
-- Nothing left on the SQS setup itself — queues, DLQ, and redrive policy are
-  all created (see above). Next: wire AWS credentials into the service.

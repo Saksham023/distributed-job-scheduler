@@ -1,5 +1,6 @@
 package com.jobscheduler.job_scheduler_service.service;
 
+import com.jobscheduler.job_scheduler_service.config.WatcherProperties;
 import com.jobscheduler.job_scheduler_service.dto.CreateJobRequest;
 import com.jobscheduler.job_scheduler_service.dto.JobResponse;
 import com.jobscheduler.job_scheduler_service.exception.InvalidRequestException;
@@ -17,7 +18,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
@@ -26,7 +26,6 @@ import java.util.UUID;
 public class JobService {
 
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
-    private static final Duration FAST_PATH_WINDOW = Duration.ofMinutes(5);
     private static final TypeReference<Map<String, Object>> PARAMS_TYPE = new TypeReference<>() {};
 
     private final JobRepository jobRepository;
@@ -35,19 +34,22 @@ public class JobService {
     private final JobExecutionPublisher publisher;
     private final TransactionTemplate transactionTemplate;
     private final JsonMapper jsonMapper;
+    private final WatcherProperties watcherProperties;
 
     public JobService(JobRepository jobRepository,
                       JobExecutionRepository jobExecutionRepository,
                       TaskTypeRepository taskTypeRepository,
                       JobExecutionPublisher publisher,
                       TransactionTemplate transactionTemplate,
-                      JsonMapper jsonMapper) {
+                      JsonMapper jsonMapper,
+                      WatcherProperties watcherProperties) {
         this.jobRepository = jobRepository;
         this.jobExecutionRepository = jobExecutionRepository;
         this.taskTypeRepository = taskTypeRepository;
         this.publisher = publisher;
         this.transactionTemplate = transactionTemplate;
         this.jsonMapper = jsonMapper;
+        this.watcherProperties = watcherProperties;
     }
 
     public JobResponse createJob(CreateJobRequest request) {
@@ -86,7 +88,7 @@ public class JobService {
     }
 
     private boolean isDueSoon(OffsetDateTime scheduledAt) {
-        return !scheduledAt.isAfter(OffsetDateTime.now().plus(FAST_PATH_WINDOW));
+        return !scheduledAt.isAfter(OffsetDateTime.now().plus(watcherProperties.lookahead()));
     }
 
     private void publishFastPath(UUID executionId, OffsetDateTime scheduledAt) {

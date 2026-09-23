@@ -24,3 +24,5 @@ Scripts to run **by hand** against the **local** database (e.g. from DataGrip).
 |------|---------|
 | `01_seed_test_user.sql` | Creates the local test user (`userId` for API requests) |
 | `02_inspect_state.sql`  | Read-only queries to check migrations, seed data, jobs and executions |
+| `03_load_test_pending_executions.sql` | Inserts 200 `PENDING` executions due within 4 min, to test the watcher's batching (bypasses the API fast path) |
+| `04_cleanup_load_test.sql` | Deletes the rows created by `03` (purge the SQS queue separately) |
