@@ -40,10 +40,14 @@ public class ExecutionWatcher {
     public void publishDueExecutions() {
         long startNanos = System.nanoTime();
         int totalQueued = 0;
+        int batches = 0;
+        int rejected = 0;
         try {
             while (true) {
                 BatchResult batch = transactionTemplate.execute(status -> publishNextBatch());
                 totalQueued += batch.accepted();
+                batches++;
+                rejected += batch.failed();
 
                 if (batch.selected() < JobExecutionPublisher.MAX_BATCH_SIZE) {
                     break;
@@ -60,19 +64,29 @@ public class ExecutionWatcher {
 
         if (totalQueued > 0) {
             long elapsedMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
-            log.info("Watcher run queued {} executions in {} ms", totalQueued, elapsedMs);
+            log.info("Watcher run queued {} executions in {} ms ({} batches, {} rejected by SQS)",
+                    totalQueued, elapsedMs, batches, rejected);
         }
     }
 
     private BatchResult publishNextBatch() {
         OffsetDateTime dueBefore = OffsetDateTime.now().plus(properties.lookahead());
+        long start = System.nanoTime();
         List<ScheduledExecution> due = jobExecutionRepository.lockDueForPublishing(dueBefore, JobExecutionPublisher.MAX_BATCH_SIZE);
         if (due.isEmpty()) {
             return new BatchResult(0, 0);
         }
+        long lockedAt = System.nanoTime();
 
         Set<UUID> accepted = publisher.publishBatch(due);
+        long sentAt = System.nanoTime();
         jobExecutionRepository.markQueued(accepted);
+        // The ids let a test spot an execution published twice (e.g. a watcher killed after
+        // sending but before its transaction committed).
+        log.debug("event=batch selected={} accepted={} lockMs={} sendMs={} markMs={} ids={}",
+                due.size(), accepted.size(), Duration.ofNanos(lockedAt - start).toMillis(),
+                Duration.ofNanos(sentAt - lockedAt).toMillis(), Duration.ofNanos(System.nanoTime() - sentAt).toMillis(),
+                due.stream().map(ScheduledExecution::id).toList());
         return new BatchResult(due.size(), accepted.size());
     }
 

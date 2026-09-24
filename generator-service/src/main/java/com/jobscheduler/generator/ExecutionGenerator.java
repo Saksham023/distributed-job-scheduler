@@ -60,7 +60,10 @@ public class ExecutionGenerator {
                     break;
                 }
             }
+            long completeStart = System.nanoTime();
             completed = scheduleRepository.completeFinishedJobs();
+            log.debug("event=complete completed={} ms={}", completed,
+                    Duration.ofNanos(System.nanoTime() - completeStart).toMillis());
         } catch (RuntimeException e) {
             log.error("Generator run stopped; will retry next run", e);
         }
@@ -73,6 +76,7 @@ public class ExecutionGenerator {
     }
 
     private BatchResult topUpNextBatch() {
+        long start = System.nanoTime();
         OffsetDateTime now = OffsetDateTime.now();
         OffsetDateTime horizon = now.plus(properties.window());
         List<DueSchedule> due = scheduleRepository.lockDueForTopUp(now.plus(properties.refillBelow()),
@@ -81,6 +85,10 @@ public class ExecutionGenerator {
         int created = 0;
         for (DueSchedule schedule : due) {
             created += topUp(schedule, now, horizon);
+        }
+        if (!due.isEmpty()) {
+            log.debug("event=batch schedules={} created={} ms={}", due.size(), created,
+                    Duration.ofNanos(System.nanoTime() - start).toMillis());
         }
         return new BatchResult(due.size(), created);
     }

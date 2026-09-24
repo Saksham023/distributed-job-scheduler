@@ -21,6 +21,8 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -58,17 +60,26 @@ public class ExecutionProcessor {
     }
 
     public Outcome process(UUID executionId, int receiveCount) {
+        long start = System.nanoTime();
         Optional<ClaimedExecution> claimed = executionRepository.claim(executionId);
+        long claimedAt = System.nanoTime();
         if (claimed.isEmpty()) {
-            return handleNotClaimed(executionId);
+            return handleNotClaimed(executionId, receiveCount);
         }
         ClaimedExecution execution = claimed.get();
+        long lateMs = Duration.between(execution.scheduledAt(), OffsetDateTime.now()).toMillis();
+        log.debug("event=claimed execution={} attempt={} receiveCount={} lateMs={}",
+                executionId, execution.attempt(), receiveCount, lateMs);
 
         try {
             sendEmail(execution);
         } catch (RuntimeException e) {
             return isPermanent(e) ? failPermanently(execution, e) : handleTransient(execution, receiveCount, e);
         }
+        long sentAt = System.nanoTime();
+        // Logged before COMPLETED is written: an execution with "sent" but no "completed" line
+        // (e.g. its worker was killed in between) is the one way a duplicate email can happen.
+        log.debug("event=sent execution={}", executionId);
 
         transactionTemplate.executeWithoutResult(status -> {
             executionRepository.markCompleted(execution.executionId());
@@ -76,8 +87,15 @@ public class ExecutionProcessor {
                 jobRepository.markCompleted(execution.jobId());
             }
         });
-        log.info("Execution {} completed", executionId);
+        long completedAt = System.nanoTime();
+        log.info("Execution {} completed: attempt={} lateMs={} claimMs={} sendMs={} completeMs={}",
+                executionId, execution.attempt(), lateMs, millis(start, claimedAt), millis(claimedAt, sentAt),
+                millis(sentAt, completedAt));
         return Outcome.DELETE_MESSAGE;
+    }
+
+    private static long millis(long fromNanos, long toNanos) {
+        return Duration.ofNanos(toNanos - fromNanos).toMillis();
     }
 
     private void sendEmail(ClaimedExecution execution) {
@@ -87,8 +105,10 @@ public class ExecutionProcessor {
         emailSender.send(new Email((String) params.get("to"), rendered.subject(), rendered.htmlBody()));
     }
 
-    private Outcome handleNotClaimed(UUID executionId) {
+    private Outcome handleNotClaimed(UUID executionId, int receiveCount) {
         Optional<JobExecutionStatus> status = executionRepository.findStatus(executionId);
+        log.debug("event=not-claimed execution={} status={} receiveCount={}",
+                executionId, status.map(Enum::name).orElse("MISSING"), receiveCount);
         if (status.isEmpty()) {
             log.warn("Execution {} not found; deleting its message", executionId);
             return Outcome.DELETE_MESSAGE;

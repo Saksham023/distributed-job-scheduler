@@ -31,7 +31,7 @@ public class JobExecutionRepository {
                         WHERE je.id = :id
                           AND je.job_id = j.id
                           AND je.status IN (:claimable)
-                        RETURNING je.id AS execution_id, j.id AS job_id, j.schedule_type,
+                        RETURNING je.id AS execution_id, j.id AS job_id, je.scheduled_at, je.attempt, j.schedule_type,
                                   j.params, t.id AS template_id, t.subject, t.body
                         """)
                 .param("id", id)
