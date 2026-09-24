@@ -17,8 +17,13 @@ see [`docs/test-plan.md`](docs/test-plan.md) → "Results".
 **Split into a multi-module Maven project (done 2026-09-24):** builds, and a
 fast-path and a watcher-path job ran end to end on the split services. Next
 (details in [`docs/backlog.md`](docs/backlog.md)):
-1. Re-run the test plan on the split services.
-2. **Recurring jobs** (cron schedules, the generator).
+1. Re-run the test plan on the split services, and add recurring-job phases
+   to it.
+
+**Recurring jobs (done 2026-09-24):** API, generator and executions endpoint
+built; checked end to end with all four services (an every-minute job with
+`maxOccurrences` 5: API created and fast-pathed runs 1–3, the generator
+created 4–5, the watcher published them, 5 emails on time, job `COMPLETED`).
 
 ## Architecture (as built)
 
@@ -32,6 +37,7 @@ fast-path and a watcher-path job ran end to end on the split services. Next
   | `api-service` | HTTP API (port 8080, Actuator) | `com.jobscheduler.api` |
   | `watcher-service` | Scheduled publisher, no web server | `com.jobscheduler.watcher` |
   | `worker-service` | SQS consumer + email, no web server; the only module with Spring Cloud AWS | `com.jobscheduler.worker` |
+  | `generator-service` | Recurring jobs: keeps ~1 hour of executions created, completes finished jobs; no web server, no SQS | `com.jobscheduler.generator` |
 
   Each service has only its own code, queries (its own `JobExecutionRepository`
   etc.) and `application.properties`; no profiles or role switches. `common`
@@ -40,10 +46,18 @@ fast-path and a watcher-path job ran end to end on the split services. Next
   job's `params` (JSON Schema of the task type's active template), saves the
   job pinned to that template version, and publishes immediately if it's due
   within the 5-minute lookahead (fast path). `GET /api/v1/jobs/{id}` returns
-  status. Errors are RFC 9457 `ProblemDetail`.
+  the job with its next unfinished run (and, for recurring jobs, the
+  schedule); `GET /api/v1/jobs/{id}/executions?limit=&before=` pages through
+  its runs, newest first (keyset pagination). Errors are RFC 9457
+  `ProblemDetail`.
 - **Watcher**: every minute, drains `PENDING` executions due
   within the lookahead in batches of 10 (`FOR UPDATE SKIP LOCKED`), publishes
   them to SQS with a per-message delay, marks them `QUEUED`.
+- **Generator**: every minute, tops up recurring schedules with fewer than 30
+  minutes of executions left to one hour ahead (batches, `SKIP LOCKED`, missed
+  runs skipped), and marks recurring jobs `COMPLETED` once their schedule has
+  ended and no run is in flight. Details: `docs/infrastructure.md` →
+  "Generator".
 - **Worker**: `@SqsListener` (Spring Cloud AWS) in manual
   acknowledgement mode; claims the execution, renders the pinned template with
   Mustache, sends HTML email through `EmailSender` (Mailpit locally), marks
@@ -51,8 +65,11 @@ fast-path and a watcher-path job ran end to end on the split services. Next
 - **Stack:** Spring Boot 4.1, Java 21, Postgres 18 (UUIDv7 keys), `JdbcClient`
   with hand-written SQL, Flyway, AWS SDK v2 + Spring Cloud AWS 4.1 (SQS),
   JMustache, networknt JSON Schema validator, Actuator.
-- **Not built yet:** recurring jobs (schema exists: `recurring_schedules`),
-  the generator, `GET /jobs` list, auth, real email delivery (SES).
+- **Recurring jobs**: 5-field cron + IANA time zone, optional
+  `startsAt`/`endsAt`/`maxOccurrences`; the API creates the first hour of
+  executions and fast-paths the ones due within 5 minutes; the generator keeps
+  it topped up. Design: `docs/schema.md` → "Recurring jobs".
+- **Not built yet:** `GET /jobs` list, auth, real email delivery (SES).
 
 ## Worker rules (settled; see `docs/infrastructure.md` → "Worker")
 
@@ -104,6 +121,7 @@ fast-path and a watcher-path job ran end to end on the split services. Next
    | API | `ApiApplication` / `api-service/target/api-service-*.jar` | `job-scheduler` |
    | Watcher | `WatcherApplication` / `watcher-service/target/watcher-service-*.jar` | `job-scheduler` |
    | Worker | `WorkerApplication` / `worker-service/target/worker-service-*.jar` | `job-scheduler-worker` |
+   | Generator | `GeneratorApplication` / `generator-service/target/generator-service-*.jar` | *(none: no AWS)* |
 
    From a terminal: `AWS_PROFILE=<profile> java -jar <jar>`. Several watchers
    or workers: start the same JAR more than once.

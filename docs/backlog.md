@@ -5,9 +5,9 @@ postponed; mark it `[x]` when done. Design reasoning lives in `schema.md` /
 `infrastructure.md`; this file is the to-do list.
 
 **Where things stand (2026-09-24):** v1 (one-time email jobs) is built and
-passes the full end-to-end test plan. The multi-module split (major item 2) is
-done; next: re-run the test plan on the split services, then recurring jobs
-(major item 1).
+passes the full end-to-end test plan. Both major items are done: the
+multi-module split and recurring jobs (built and checked end to end). Next:
+re-run the test plan on the split services, with recurring-job phases added.
 
 ## v1: one-time jobs (done)
 
@@ -39,35 +39,49 @@ Schema already exists (`recurring_schedules`: `cron_expression`, `starts_at`,
 ("Status lifecycle" covers who completes a recurring job). Start by settling
 the open decisions, then build.
 
-Open decisions:
-- [ ] Cron parsing library (must support arbitrary cron syntax and time
-      zones).
-- [ ] Template pinning for recurring jobs: keep the version the job was
-      created with for its whole lifetime, or move to newer versions?
-- [ ] Generator lookahead window (e.g. keep 1 day of executions generated) and
-      how often it runs.
+Decisions (details in `schema.md` → "Recurring jobs"):
+- [x] Cron library: Spring's `CronExpression`; clients send standard 5-field
+      cron, prefixed with `0 ` for seconds.
+- [x] Minimum frequency: once a minute (follows from the 5-field syntax).
+- [x] Window: one hour of executions always materialized; the API creates
+      the first window in the job's transaction, the generator (every
+      minute) tops it up.
+- [x] Missed runs (generator down): skipped, not caught up.
+- [x] Template pinning: recurring jobs keep the version they were created
+      with (a "move to latest template" feature can come later).
+- [x] Migration V7: `recurring_schedules.timezone`, `occurrences_generated`,
+      checks on `max_occurrences` and `ends_at`.
 
 Build:
-- [ ] API: optional `cronExpression` (+ `startsAt`, `endsAt`,
+- [x] API: optional `cronExpression` (+ `startsAt`, `endsAt`,
       `maxOccurrences`, `timezone`) on `CreateJobRequest`; its presence means
-      `RECURRING`. Backward compatible for existing clients.
-- [ ] `JobService.createJob`: replace the hardcoded `ScheduleType.ONE_TIME`
-      with a `switch` on the schedule type; add
-      `JobRepository.insertRecurringSchedule`; compute the first execution
-      from the cron expression.
-- [ ] Migration: `timezone` column on `recurring_schedules` ("9am daily" needs
-      a zone; compute with `ZonedDateTime`).
-- [ ] Generator (a scheduled task, likely its own module and process like
-      the watcher, e.g. `generator-service`): tops up `job_executions` within
-      its lookahead window, advances
-      `generated_until` (the `UNIQUE (job_id, scheduled_at)` constraint makes
-      re-runs idempotent), and flips `jobs.status` to `COMPLETED` when the
-      schedule is exhausted and the last execution is terminal. The worker
-      must not complete recurring jobs (it already only completes `ONE_TIME`).
-- [ ] `GET /jobs/{id}/executions` (a recurring job has many executions).
-- [ ] Give `@Scheduled` tasks their own thread pool
-      (`spring.task.scheduling.pool.size`) if the generator shares a process
-      with the watcher: by default all scheduled tasks share one thread.
+      `RECURRING`. Backward compatible for existing clients. Cross-field rules
+      in `ScheduleParser` → sealed `Schedule` (`OneTime` / `Recurring`).
+- [x] `JobService.createJob`: `switch` on the `Schedule`; recurring creates the
+      first hour of executions (one `unnest` insert) in the job's transaction;
+      one batched fast path (`publishDueSoon`) for both kinds. Checked end to
+      end: an every-minute job with `maxOccurrences` 3 ran 3 times on time.
+- [x] Generator (`generator-service`, `infrastructure.md` → "Generator"):
+      refill below 30 min to 1 h ahead, batches with `SKIP LOCKED`, missed runs
+      skipped, `ON CONFLICT DO NOTHING`, completes exhausted jobs, marks
+      invalid stored schedules `FAILED`. Checked with ten edge-case schedules
+      and two generators at once.
+- [x] `GET /jobs/{id}` shows the next unfinished run (else the most recent)
+      and, for recurring jobs, a `recurrence` block (cron, zone, limits, runs
+      created).
+- [ ] Mark a recurring job `FAILED` automatically in more cases? Today only an
+      invalid stored schedule does; failed individual runs never fail the job
+      (by design).
+- [x] `GET /jobs/{id}/executions?limit=&before=`: newest first, keyset
+      pagination on `scheduled_at` (served by the `UNIQUE (job_id,
+      scheduled_at)` index), `nextBefore` cursor, `limit` 1–100 (default 20),
+      `404` for an unknown job.
+- [x] End-to-end check with all four services (2026-09-24): every-minute
+      job, `maxOccurrences` 5, shortened window (3 min) passed on the command
+      line so the generator had to act: API created and fast-pathed runs 1–3,
+      generator created 4–5 at T+2 min, watcher published them, worker sent 5
+      emails on time (attempt 1), generator marked the job `COMPLETED` 38 s
+      after the last run. No errors in any log.
 - [ ] Extend `docs/test-plan.md` with recurring-job phases.
 
 ## Next major item 2: multi-module Maven project

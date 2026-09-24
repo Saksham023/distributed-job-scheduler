@@ -259,6 +259,57 @@ that become due mid-drain are included.
 row as `PENDING` and due, producing one duplicate message. Rare, and the
 worker's atomic claim makes duplicates harmless (at-least-once delivery).
 
+## Generator (recurring jobs)
+
+`generator-service`, its own process (no web server, no SQS). Keeps every
+active recurring job's executions created about an hour ahead, and completes
+recurring jobs whose schedule has ended. It only creates rows; the watcher
+publishes them as for any other execution. Decisions behind it: `schema.md` →
+"Recurring jobs".
+
+**Each run** (`@Scheduled`, fixed delay `app.generator.interval` = 1 min):
+
+1. **Top up, in batches** (`batch-size` 100, one transaction per batch, drained
+   until a batch comes back short, like the watcher). Selects active schedules
+   that still produce runs (`max_occurrences` not reached, not covered past
+   `ends_at`) with `generated_until < now + refill-below`, locked `FOR UPDATE
+   OF rs SKIP LOCKED` so several generators share the work. For each:
+   - `after` = latest of `generated_until`, `starts_at − 1 ns` (keeps a run
+     exactly at `starts_at`) and **now** (skips runs missed while the generator
+     was down); `until` = earliest of now + `window` and `ends_at`; `limit` =
+     runs still allowed by `max_occurrences`.
+   - `Occurrences.between(...)` (the same code the API uses), one `unnest`
+     insert with `ON CONFLICT (job_id, scheduled_at) DO NOTHING`;
+     `occurrences_generated += rows actually inserted`; `generated_until =
+     GREATEST(generated_until, now + window)` (only moves forward).
+2. **Complete** in one statement: `ACTIVE` recurring jobs whose schedule can't
+   produce more runs (`max_occurrences` reached, or `generated_until >=
+   ends_at`) and that have no `PENDING`/`QUEUED`/`PROCESSING` run →
+   `COMPLETED`. Failed runs don't fail the job. The top-up and completion
+   conditions are disjoint (not exhausted vs exhausted), so they can't race.
+
+**Refill threshold (hysteresis).** A schedule is topped up only once fewer than
+`refill-below` (30 min) of runs remain, then filled to `window` (1 h). Topping
+up whenever less than an hour remained would rewrite every schedule every
+minute, since the horizon moves each minute; with the threshold each schedule
+is written about every 30 minutes and there's always ≥ 30 minutes of slack.
+`refill-below` must stay above interval + the watcher's lookahead (1 + 5 min).
+`window` must equal the API's `app.recurring.window`.
+
+**Invalid stored schedule** (cron or zone that doesn't parse, only possible
+with data written outside the API): the job is marked `FAILED` and logged.
+Skipping it instead would select it again in the next batch forever.
+
+**Log line** (only when something happened): `Generator run topped up N
+schedules (M executions created) and completed K jobs in X ms`.
+
+**Checked 2026-09-24** with ten schedules in edge-case states and two
+generators running at once (batch size 2): running low, generator down 3 h
+(missed runs skipped), `max_occurrences` reached / partly used, `ends_at`
+passed / in the future, invalid cron (`FAILED`), healthy (untouched), future
+`starts_at`, and recomputing existing runs (`ON CONFLICT`, counter exact). No
+duplicate runs; the two generators split the work.
+
 ## Build philosophy: happy path first
 
 Failure handling (worker crash mid-processing, redelivery races, retries,

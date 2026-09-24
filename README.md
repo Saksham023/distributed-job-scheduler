@@ -1,9 +1,10 @@
 # Distributed Job Scheduler
 
-A job scheduler that accepts "run this at time T" requests over HTTP and
-executes them on time, reliably, across multiple processes. Jobs are stored in
-PostgreSQL, handed off through Amazon SQS, and executed by horizontally
-scalable workers. The first job type sends templated HTML emails.
+A job scheduler that accepts "run this at time T" and "run this on a cron
+schedule" requests over HTTP and executes them on time, reliably, across
+multiple processes. Jobs are stored in PostgreSQL, handed off through Amazon
+SQS, and executed by horizontally scalable workers. The first job type sends
+templated HTML emails.
 
 Built with Java 21, Spring Boot 4, PostgreSQL 18 and Amazon SQS.
 
@@ -41,6 +42,7 @@ flowchart LR
     SQS -->|message visible at due time| Worker[worker-service]
     Worker -->|claim, complete / fail| DB
     Worker -->|render template, send| Mail[SMTP / email provider]
+    Generator[generator-service] -->|every minute:<br/>keep 1 hour of<br/>recurring runs created| DB
     SQS -.->|after 5 failed attempts| DLQ[[Dead-letter queue]]
 ```
 
@@ -50,7 +52,10 @@ flowchart LR
 2. **Watcher** runs every minute, picks up executions due within the next five
    minutes in batches, and publishes them to SQS with a delay so each message
    appears exactly when the job is due.
-3. **Worker** receives the message, atomically claims the execution, renders
+3. **Generator** (recurring jobs) keeps the next hour of runs created for
+   every active cron schedule, and marks a recurring job completed once its
+   schedule has ended.
+4. **Worker** receives the message, atomically claims the execution, renders
    the email, sends it, marks the execution completed, and only then deletes
    the message. If anything fails before that, SQS redelivers.
 
@@ -64,6 +69,7 @@ Each execution moves through `PENDING → QUEUED → PROCESSING → COMPLETED` (
 | [`api-service`](api-service) | REST API for creating and reading jobs |
 | [`watcher-service`](watcher-service) | Publishes due executions to SQS |
 | [`worker-service`](worker-service) | Consumes from SQS and executes jobs (sends email) |
+| [`generator-service`](generator-service) | Creates upcoming runs of recurring (cron) jobs |
 | [`common`](common) | Shared library: statuses, the SQS message contract, the publisher |
 | [`db-migrations`](db-migrations) | Flyway migrations; runs once before the services and exits |
 | [`docs`](docs) | Design documents, test plan and results, backlog |
@@ -105,6 +111,7 @@ Compose
    java -jar api-service/target/api-service-0.0.1-SNAPSHOT.jar
    java -jar watcher-service/target/watcher-service-0.0.1-SNAPSHOT.jar
    java -jar worker-service/target/worker-service-0.0.1-SNAPSHOT.jar
+   java -jar generator-service/target/generator-service-0.0.1-SNAPSHOT.jar
    ```
    Start more watchers or workers the same way to scale out.
 
@@ -128,10 +135,37 @@ curl -X POST http://localhost:8080/api/v1/jobs \
 Returns `201 Created` with a `Location` header and the job, including its
 current `executionStatus`.
 
-**Check a job**
+**Schedule a recurring job**: send a standard 5-field cron expression and a
+time zone instead of `scheduledAt` (at most once a minute):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "userId": 1,
+        "taskType": "welcome_email",
+        "params": { "to": "someone@example.com", "first_name": "Sam" },
+        "cronExpression": "30 9 * * MON-FRI",
+        "timezone": "Asia/Kolkata",
+        "maxOccurrences": 20
+      }'
+```
+
+`startsAt`, `endsAt` and `maxOccurrences` are optional. Runs happen at the
+local time of the given zone, including across daylight-saving changes.
+
+**Check a job**: its status and next run (and, for recurring jobs, the
+schedule):
 
 ```bash
 curl http://localhost:8080/api/v1/jobs/{id}
+```
+
+**List a job's runs**: newest first, paged (`limit` up to 100; pass the
+returned `nextBefore` as `before` for the next page):
+
+```bash
+curl "http://localhost:8080/api/v1/jobs/{id}/executions?limit=20"
 ```
 
 Invalid requests return `400` with an
@@ -157,7 +191,6 @@ outage. Every scenario recovered on its own without restarts or data loss.
 
 ## Roadmap
 
-- Recurring jobs (cron schedules) with a generator service
 - Real email delivery through Amazon SES
 - Authentication
 - Automated integration tests with Testcontainers

@@ -22,6 +22,7 @@
         <module>api-service</module>
         <module>watcher-service</module>
         <module>worker-service</module>
+        <module>generator-service</module>
     </modules>
 
     <properties>
