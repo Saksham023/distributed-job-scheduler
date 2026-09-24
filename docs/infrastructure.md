@@ -85,9 +85,10 @@ conversion.
   after the visibility timeout (like Spring Kafka's `AckMode.MANUAL`).
 - `ApproximateReceiveCount` is read from the message headers.
 - It uses its own `SqsAsyncClient` (configured via `spring.cloud.aws.*`); our
-  `SqsClient` in `SqsConfig` stays for publishing (API, watcher).
-- The listener must run only in the worker process: disabled for the API and
-  watcher roles by configuration.
+  `SqsClient` (`common`'s `SqsPublisherConfig`) is only for publishing (API,
+  watcher).
+- Only `worker-service` depends on Spring Cloud AWS, so the listener exists
+  only in the worker process.
 
 ### Steps (ack last)
 
@@ -287,7 +288,7 @@ created per environment via `app.email.provider` (`@ConditionalOnProperty`):
 No default provider (`matchIfMissing` not used): a missing or misspelled
 `app.email.provider` fails startup instead of silently sending nothing.
 
-**SMTP timeouts** (`application-worker.properties`): connect 5s, read 10s,
+**SMTP timeouts** (`worker-service` `application.properties`): connect 5s, read 10s,
 write 10s. Spring's mail client has none by default, so a mail server that
 accepts the connection and then hangs would block a worker thread forever:
 each hang permanently takes one of the listener's concurrent slots, and after
@@ -300,6 +301,6 @@ network call needs a timeout.
 
 Docker Compose setup lives in [`docker/postgres/`](../docker/postgres/),
 providing an empty database only; the schema is created and upgraded by the
-app's Flyway migrations (see `docs/schema.md`). See that folder's README for
+`db-migrations` app's Flyway migrations (see `docs/schema.md`). See that folder's README for
 usage.
 

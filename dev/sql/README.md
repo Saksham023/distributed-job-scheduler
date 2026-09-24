@@ -5,7 +5,7 @@ Scripts to run **by hand** against the **local** database (e.g. from DataGrip).
 - Never run these against production.
 - These are not migrations: schema changes and reference data every
   environment needs (like task types) go in Flyway migrations under
-  `job-scheduler-service/src/main/resources/db/migration/`.
+  `db-migrations/src/main/resources/db/migration/`.
 - Scripts are safe to re-run.
 
 ## Local connection

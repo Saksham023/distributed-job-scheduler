@@ -14,27 +14,37 @@ phases of the end-to-end test plan pass (load of 2,000 jobs, duplicate
 messages, mail-server and database outages, bad data, killed processes):
 see [`docs/test-plan.md`](docs/test-plan.md) → "Results".
 
-**Next, the two major items** (details in [`docs/backlog.md`](docs/backlog.md)):
-1. **Recurring jobs** (cron schedules, the generator).
-2. **Split into a multi-module Maven project** (`common`, `api-service`,
-   `watcher-service`, `worker-service`).
+**Split into a multi-module Maven project (done 2026-09-24):** builds, and a
+fast-path and a watcher-path job ran end to end on the split services. Next
+(details in [`docs/backlog.md`](docs/backlog.md)):
+1. Re-run the test plan on the split services.
+2. **Recurring jobs** (cron schedules, the generator).
 
 ## Architecture (as built)
 
-- **One codebase, three processes.** API, watcher and worker live in one
-  Spring Boot project (`job-scheduler-service/`), each role in its own
-  package, and run as separate processes: the `watcher` / `worker` Spring
-  profiles switch a role on (`app.watcher.enabled`, `app.worker.enabled`) and
-  turn off the web server and Flyway.
-- **API** (default profile): `POST /api/v1/jobs` validates the request and the
+- **Multi-module Maven project, one repo.** A parent `pom.xml` at the root
+  (Spring Boot parent, BOMs, shared versions, module list) and five modules:
+
+  | Module | What it is | Package |
+  |---|---|---|
+  | `common` | Plain library JAR packed into the services (never run alone): status enums, `JobExecution`, the SQS message contract and `JobExecutionPublisher` (`SqsPublisherConfig`, imported by API and watcher) | `com.jobscheduler.common` |
+  | `db-migrations` | One-shot app: runs the Flyway migrations and exits (non-zero on failure). Run before the services | `com.jobscheduler.migrations` |
+  | `api-service` | HTTP API (port 8080, Actuator) | `com.jobscheduler.api` |
+  | `watcher-service` | Scheduled publisher, no web server | `com.jobscheduler.watcher` |
+  | `worker-service` | SQS consumer + email, no web server; the only module with Spring Cloud AWS | `com.jobscheduler.worker` |
+
+  Each service has only its own code, queries (its own `JobExecutionRepository`
+  etc.) and `application.properties`; no profiles or role switches. `common`
+  holds only what two or more services share. No service runs Flyway.
+- **API**: `POST /api/v1/jobs` validates the request and the
   job's `params` (JSON Schema of the task type's active template), saves the
   job pinned to that template version, and publishes immediately if it's due
   within the 5-minute lookahead (fast path). `GET /api/v1/jobs/{id}` returns
   status. Errors are RFC 9457 `ProblemDetail`.
-- **Watcher** (`watcher` profile): every minute, drains `PENDING` executions due
+- **Watcher**: every minute, drains `PENDING` executions due
   within the lookahead in batches of 10 (`FOR UPDATE SKIP LOCKED`), publishes
   them to SQS with a per-message delay, marks them `QUEUED`.
-- **Worker** (`worker` profile): `@SqsListener` (Spring Cloud AWS) in manual
+- **Worker**: `@SqsListener` (Spring Cloud AWS) in manual
   acknowledgement mode; claims the execution, renders the pinned template with
   Mustache, sends HTML email through `EmailSender` (Mailpit locally), marks
   `COMPLETED`, then deletes the message. Rules below.
@@ -79,20 +89,25 @@ see [`docs/test-plan.md`](docs/test-plan.md) → "Results".
      delete, change visibility, get attributes/URL (worker). Also used to read
      the queue's message counts from the CLI.
    Neither can purge a queue or read the DLQ: do that in the SQS console.
-3. **Processes** (IntelliJ run configurations, all with `AWS_PROFILE` set):
-
-   | Run configuration | Active profile | `AWS_PROFILE` |
-   |---|---|---|
-   | `JobSchedulerServiceApplication` (API) | *(none)* | `job-scheduler` |
-   | `Watcher` | `watcher` | `job-scheduler` |
-   | `Worker` | `worker` | `job-scheduler-worker` |
-
-   From a terminal (in `job-scheduler-service/`, after `./mvnw package`) the
-   equivalent is `java -jar target/*.jar --spring.profiles.active=<profile>`
-   with `AWS_PROFILE` exported (the
+3. **Build** from the repo root: `./mvnw package` (all modules; add
+   `-DskipTests` to skip the API context test, which needs Postgres). The
    project targets Java 21; the terminal's default JDK may be older, so set
-   `JAVA_HOME` to a 21+ JDK). Flyway migrations run at API startup only.
-4. **Reference data**: the `welcome_email` task type and its template come
+   `JAVA_HOME` to a 21+ JDK (`export JAVA_HOME=$(/usr/libexec/java_home -v 21+)`).
+4. **Migrations first**: run `db-migrations` once (and again whenever a
+   migration is added); it applies them and exits.
+5. **Processes** (IntelliJ run configurations on each module's application
+   class, or the JARs):
+
+   | Process | Main class / JAR | `AWS_PROFILE` |
+   |---|---|---|
+   | Migrations (one-shot) | `DbMigrationsApplication` / `db-migrations/target/db-migrations-*.jar` | *(none)* |
+   | API | `ApiApplication` / `api-service/target/api-service-*.jar` | `job-scheduler` |
+   | Watcher | `WatcherApplication` / `watcher-service/target/watcher-service-*.jar` | `job-scheduler` |
+   | Worker | `WorkerApplication` / `worker-service/target/worker-service-*.jar` | `job-scheduler-worker` |
+
+   From a terminal: `AWS_PROFILE=<profile> java -jar <jar>`. Several watchers
+   or workers: start the same JAR more than once.
+6. **Reference data**: the `welcome_email` task type and its template come
    from migrations; the local test user (`userId` 1) from
    `dev/sql/01_seed_test_user.sql`.
 
@@ -101,7 +116,7 @@ see [`docs/test-plan.md`](docs/test-plan.md) → "Results".
 - [`docs/schema.md`](docs/schema.md) — schema design and the reasoning behind
   each decision (normalization, enums vs lookup tables, UUIDv7, templates and
   JSON Schema validation, status lifecycle). DDL lives in Flyway migrations
-  under `job-scheduler-service/src/main/resources/db/migration/`.
+  under `db-migrations/src/main/resources/db/migration/`.
 - [`docs/infrastructure.md`](docs/infrastructure.md) — SQS design, the watcher,
   the worker (statuses, updates, failures, `@SqsListener`), email, AWS setup,
   local Docker.
@@ -130,4 +145,5 @@ see [`docs/test-plan.md`](docs/test-plan.md) → "Results".
 - **Testing**: Claude may run tests from the terminal when asked, explaining
   first the aim, the actions (e.g. direct inserts vs `POST` calls) and the
   expected timeline; stop all started processes afterwards.
-- **Git**: commit only when asked; never push (the user pushes).
+- **Git**: commit only when asked; never push (the user pushes). No
+  `Co-Authored-By` or other Claude attribution in commit messages or PRs.

@@ -11,7 +11,7 @@ in order: each phase assumes the previous ones pass. Every test states what
 | Statuses, attempts, errors | `dev/sql/05_test_results.sql` (queries 1–4) |
 | Email count | Mailpit sidebar, or `curl -s "http://localhost:8025/api/v1/messages?limit=1" \| grep -o '"total":[0-9]*'` |
 | Queue / DLQ counts | SQS console: `job-executions` and `job-executions-dlq` → "Messages available" / "in flight" |
-| What each process did | IntelliJ Run window for API, Watcher(s), Worker(s) |
+| What each process did | IntelliJ Run window (or log file) for API, Watcher(s), Worker(s) |
 
 ## Phase 0: clean start (before every phase)
 
@@ -21,7 +21,8 @@ in order: each phase assumes the previous ones pass. Every test states what
 3. Mailpit → **Delete all**. SQS console → `job-executions` → **Purge**
    (and the DLQ, if it has messages).
 4. Start what the phase needs: **API**, **Watcher**, **Worker** (run
-   configurations; `Worker` uses `AWS_PROFILE=job-scheduler-worker`).
+   configurations or JARs, see `CLAUDE.md` → "Running locally"; the worker
+   uses `AWS_PROFILE=job-scheduler-worker`).
 
 ## Phase 1: one job at a time (functional happy path)
 
@@ -188,7 +189,8 @@ Postgres for ~30 seconds and start it again
 ## Results (run 2026-09-24)
 
 All phases passed. Run from the terminal (API/watchers/workers started from
-the JAR with the same profiles and AWS users as the IntelliJ configurations).
+the JAR with the same profiles and AWS users as the IntelliJ configurations;
+this was before the multi-module split, when one JAR ran all three roles).
 
 | Phase | Result |
 |---|---|

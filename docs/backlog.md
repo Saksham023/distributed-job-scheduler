@@ -5,17 +5,18 @@ postponed; mark it `[x]` when done. Design reasoning lives in `schema.md` /
 `infrastructure.md`; this file is the to-do list.
 
 **Where things stand (2026-09-24):** v1 (one-time email jobs) is built and
-passes the full end-to-end test plan. Next: the two major items below, then
-the smaller groups.
+passes the full end-to-end test plan. The multi-module split (major item 2) is
+done; next: re-run the test plan on the split services, then recurring jobs
+(major item 1).
 
 ## v1: one-time jobs (done)
 
 - [x] API: `POST /api/v1/jobs` (201 + `Location`), `GET /api/v1/jobs/{id}`,
       `ProblemDetail` errors; `params` validated against the active template's
       JSON Schema; template version pinned on the job (`jobs.template_id`).
-- [x] Watcher (`watcher` profile): batches of 10, `FOR UPDATE SKIP LOCKED`,
+- [x] Watcher: batches of 10, `FOR UPDATE SKIP LOCKED`,
       drains until empty, shared lookahead with the `POST` fast path.
-- [x] Worker (`worker` profile): `@SqsListener` in manual acknowledgement
+- [x] Worker: `@SqsListener` in manual acknowledgement
       mode; atomic claim, `PROCESSING` reset, permanent/transient/last-attempt
       failures, ack last; strict Mustache rendering; HTML email via
       `EmailSender` (Mailpit locally); mail timeouts (5s/10s/10s).
@@ -56,8 +57,9 @@ Build:
       from the cron expression.
 - [ ] Migration: `timezone` column on `recurring_schedules` ("9am daily" needs
       a zone; compute with `ZonedDateTime`).
-- [ ] Generator (a scheduled task, likely its own profile/process like the
-      watcher): tops up `job_executions` within its lookahead window, advances
+- [ ] Generator (a scheduled task, likely its own module and process like
+      the watcher, e.g. `generator-service`): tops up `job_executions` within
+      its lookahead window, advances
       `generated_until` (the `UNIQUE (job_id, scheduled_at)` constraint makes
       re-runs idempotent), and flips `jobs.status` to `COMPLETED` when the
       schedule is exhausted and the last execution is terminal. The worker
@@ -70,18 +72,35 @@ Build:
 
 ## Next major item 2: multi-module Maven project
 
-- [ ] Restructure this repo into a parent `pom.xml` with modules `common`,
+- [x] Restructure this repo into a parent `pom.xml` with modules `common`,
       `api-service`, `watcher-service`, `worker-service` (and later the
       generator). Each service is its own Spring Boot app and Docker image;
       `common` is a library packed into each JAR at build time, never
       deployed alone.
-- [ ] `common` holds only what's genuinely shared: the SQS message contract
+- [x] `common` holds only what's genuinely shared: the SQS message contract
       (`JobExecutionMessage`), SQS config, status enums, table shapes.
       Service-specific queries and logic stay in their service (the watcher's
       batch query, the worker's claim).
-- [ ] Decide who owns Flyway migrations (the API service, or a separate
-      pipeline step) and turn Flyway off in the others.
-- [ ] Remove the role switches (`app.watcher.enabled`, `app.worker.enabled`,
+- [x] Decide who owns Flyway migrations: **a separate `db-migrations`
+      module** (a small Spring Boot app that runs Flyway and exits). Runs as
+      its own step before a deployment (e.g. a Kubernetes Job), so no service
+      needs schema-changing database rights and no service owns the schema.
+      Locally: run it once, and again whenever a migration is added. Flyway
+      is off in all three services.
+- [x] Split done (2026-09-24): parent `pom.xml` at the root (BOMs,
+      versions, module list), Maven wrapper at the root, modules `common`,
+      `db-migrations`, `api-service`, `watcher-service`, `worker-service`;
+      `job-scheduler-service` removed; Lombok dropped (unused). Built, the
+      API context test passes, and a fast-path and a watcher-path job ran end
+      to end.
+- [ ] Re-run the full test plan on the split services (phases 1, 3, 5, 7 at
+      least).
+- [ ] Health endpoints for the watcher and worker: they have no web server
+      now, so a container platform can't probe them. Add Actuator with a
+      management port when they're containerized.
+- [ ] One Dockerfile per service (and `db-migrations`), and a Compose file
+      that runs the whole system locally.
+- [x] Remove the role switches (`app.watcher.enabled`, `app.worker.enabled`,
       the `watcher`/`worker` profiles): each service contains only its own
       code.
 - [ ] Keep the message format backward compatible across services (add

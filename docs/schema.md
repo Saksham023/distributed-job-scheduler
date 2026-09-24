@@ -9,8 +9,9 @@ engine with B-tree indexes is built for. The one semi-flexible field
 than being a reason to go full document-store.
 
 The schema is managed by **Flyway**: versioned SQL files in
-[`job-scheduler-service/src/main/resources/db/migration/`](../job-scheduler-service/src/main/resources/db/migration/),
-starting with `V1__init.sql`. At startup Flyway applies any migration not yet
+[`db-migrations/src/main/resources/db/migration/`](../db-migrations/src/main/resources/db/migration/),
+starting with `V1__init.sql`. The `db-migrations` app (a one-shot Spring Boot
+process, run before the services) applies any migration not yet
 recorded in the database's `flyway_schema_history` table. Rules: never edit a
 migration that has already run (checksum validation fails startup); every
 schema change is a new `V<n>__<description>.sql` file. Chosen over Docker's

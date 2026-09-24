@@ -3,8 +3,8 @@
 Spins up an empty Postgres 18 database (18+ is required for the native
 `uuidv7()` used as the default for UUID primary keys; note 18+ images mount
 the volume at `/var/lib/postgresql`, not `/var/lib/postgresql/data`). The schema is not created here: the
-app's Flyway migrations create and upgrade it at startup
-(`job-scheduler-service/src/main/resources/db/migration/`).
+`db-migrations` app's Flyway migrations create and upgrade it
+(`db-migrations/src/main/resources/db/migration/`); run it once before starting the services.
 
 ## Usage
 
