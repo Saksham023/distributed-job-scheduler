@@ -1,14 +1,13 @@
 package com.jobscheduler.common.messaging;
 
 import com.jobscheduler.common.config.SqsProperties;
-import com.jobscheduler.common.model.JobExecution;
+import com.jobscheduler.common.model.ScheduledExecution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.SendMessageBatchRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageBatchRequestEntry;
 import software.amazon.awssdk.services.sqs.model.SendMessageBatchResponse;
-import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
@@ -34,15 +33,7 @@ public class JobExecutionPublisher {
         this.queueUrl = properties.jobExecutionsQueueUrl();
     }
 
-    public void publish(UUID jobExecutionId, OffsetDateTime scheduledAt) {
-        sqsClient.sendMessage(SendMessageRequest.builder()
-                .queueUrl(queueUrl)
-                .messageBody(toMessageBody(jobExecutionId))
-                .delaySeconds(delaySecondsUntil(scheduledAt))
-                .build());
-    }
-
-    public Set<UUID> publishBatch(List<JobExecution> executions) {
+    public Set<UUID> publishBatch(List<ScheduledExecution> executions) {
         if (executions.isEmpty()) {
             return Set.of();
         }

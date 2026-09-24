@@ -2,7 +2,7 @@ package com.jobscheduler.watcher;
 
 import com.jobscheduler.watcher.config.WatcherProperties;
 import com.jobscheduler.common.messaging.JobExecutionPublisher;
-import com.jobscheduler.common.model.JobExecution;
+import com.jobscheduler.common.model.ScheduledExecution;
 import com.jobscheduler.watcher.repository.JobExecutionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,7 +66,7 @@ public class ExecutionWatcher {
 
     private BatchResult publishNextBatch() {
         OffsetDateTime dueBefore = OffsetDateTime.now().plus(properties.lookahead());
-        List<JobExecution> due = jobExecutionRepository.lockDueForPublishing(dueBefore, JobExecutionPublisher.MAX_BATCH_SIZE);
+        List<ScheduledExecution> due = jobExecutionRepository.lockDueForPublishing(dueBefore, JobExecutionPublisher.MAX_BATCH_SIZE);
         if (due.isEmpty()) {
             return new BatchResult(0, 0);
         }

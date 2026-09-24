@@ -16,5 +16,13 @@ public record JobDetails(
         JobStatus status,
         OffsetDateTime scheduledAt,
         JobExecutionStatus executionStatus,
-        OffsetDateTime createdAt
-) {}
+        OffsetDateTime createdAt,
+        // Recurring jobs only (null for one-time jobs)
+        String cronExpression,
+        String timezone,
+        OffsetDateTime startsAt,
+        OffsetDateTime endsAt,
+        Integer maxOccurrences,
+        Integer occurrencesGenerated
+) {
+}

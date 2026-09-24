@@ -1,6 +1,6 @@
 package com.jobscheduler.watcher.repository;
 
-import com.jobscheduler.common.model.JobExecution;
+import com.jobscheduler.common.model.ScheduledExecution;
 import com.jobscheduler.common.model.JobExecutionStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -20,12 +20,11 @@ public class JobExecutionRepository {
     }
 
     // Must run inside a transaction: the row locks are released when it commits.
-    public List<JobExecution> lockDueForPublishing(OffsetDateTime dueBefore, int limit) {
+    public List<ScheduledExecution> lockDueForPublishing(OffsetDateTime dueBefore, int limit) {
         // 'PENDING' is a literal, not a bound parameter, so Postgres can use the
         // partial index idx_executions_pending_schedule (WHERE status = 'PENDING').
         return jdbcClient.sql("""
-                        SELECT id, job_id, scheduled_at, status, attempt, error_message,
-                               started_at, finished_at, created_at
+                        SELECT id, scheduled_at
                         FROM job_executions
                         WHERE status = 'PENDING' AND scheduled_at <= :dueBefore
                         ORDER BY scheduled_at
@@ -34,7 +33,7 @@ public class JobExecutionRepository {
                         """)
                 .param("dueBefore", dueBefore)
                 .param("limit", limit)
-                .query(JobExecution.class)
+                .query(ScheduledExecution.class)
                 .list();
     }
 

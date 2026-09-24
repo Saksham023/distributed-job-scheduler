@@ -83,10 +83,11 @@ only `psql`: `psql` doesn't do placeholder replacement.
     convention elsewhere in the codebase — roughly in that order.
 
 - **`generated_until` on `recurring_schedules`** is the watermark the
-  generator advances; drives a lookahead-window top-up strategy (e.g.
-  "always keep 1 day of executions materialized") rather than a fixed count
-  (e.g. "next 100 executions"), since a fixed count doesn't scale sensibly
-  across jobs with very different frequencies (10s vs. daily).
+  generator advances; drives a time-window top-up strategy ("always keep the
+  next hour of executions materialized", see "Recurring jobs" below) rather
+  than a fixed count (e.g. "next 100 executions"), since a fixed count
+  doesn't scale sensibly across jobs with very different frequencies
+  (every minute vs. daily).
 
 - **`UNIQUE (job_id, scheduled_at)` on `job_executions`** makes the generator
   idempotent if it ever runs twice for the same window.
@@ -156,6 +157,55 @@ only `psql`: `psql` doesn't do placeholder replacement.
   then set `NOT NULL`. The migration must work on a database that already has
   rows, not only an empty one.
 
+## Recurring jobs
+
+Decided 2026-09-24.
+
+- **Cron parsing: Spring's `CronExpression`** (in `spring-context`, already
+  on the classpath; maintained with Spring; computes the next run in a
+  `ZonedDateTime`, so time zones and daylight-saving changes are handled).
+  Chosen over cron-utils (multi-dialect, not needed, slower release cadence)
+  and Quartz (a whole scheduler framework just for its parser).
+- **Clients send standard 5-field cron** (`minute hour day-of-month month
+  day-of-week`, e.g. `30 9 * * MON-FRI`). The API rejects anything that
+  isn't exactly 5 fields (`400`), then prefixes `0 ` for Spring's 6-field
+  syntax (seconds fixed at 0).
+- **Minimum frequency: once a minute**, a consequence of the 5-field syntax,
+  not a separate rule. Same as Linux cron, Kubernetes CronJobs, EventBridge
+  Scheduler and Cloud Scheduler. Sub-minute work (every 5 s = 17,280
+  executions a day per job) is a job for a long-running process, not a
+  scheduler.
+- **Time zone per job** (IANA name, e.g. `Asia/Kolkata`): "09:00 daily"
+  means 09:00 in the job's zone, including across daylight-saving changes.
+- **Materialization window: one hour.** Every active recurring job always
+  has its executions for the next hour created as `PENDING` rows.
+  `generated_until` means "every occurrence up to this instant exists as a
+  row": the window's end, not the time of the last row (a daily job usually
+  has no row in the window, and that's fine).
+  - **The API creates the first window** in the same transaction as the job,
+    so a new job never waits for the generator. After commit, the fast path
+    publishes the ones due within the lookahead (one `SendMessageBatch`) and
+    marks them `QUEUED`, as for one-time jobs.
+  - **The generator** runs every minute and tops up every active recurring
+    job to now + 1 hour. It has an hour of slack: a late or briefly stopped
+    generator delays nothing. The window must exceed generator interval +
+    watcher lookahead (1 + 5 min).
+  - **One insert per window**, however many rows: Java computes the times
+    and sends them as one array (`INSERT … SELECT :jobId, t FROM
+    unnest(:times::timestamptz[])`). `UNIQUE (job_id, scheduled_at)` makes a
+    repeated run harmless.
+  - **Cost**: a per-minute job keeps ~60 future rows; with the 1-minute
+    minimum that's the worst case.
+- **Missed runs are skipped**, not caught up: if `generated_until` is in the
+  past (generator was down), generation restarts from now. Catching up would
+  fire a burst of stale runs (e.g. 180 "daily report" emails). Same default
+  as Kubernetes CronJobs and EventBridge.
+- **Template pinning applies to recurring jobs too**: every run uses the
+  version the job was created with (its `params` were validated against that
+  version's schema; a newer version may require fields the job doesn't have).
+  Content changes don't reach existing recurring jobs; a later "move job to
+  the latest template" feature can do that deliberately.
+
 ## Status lifecycle
 
 Fixed-list values (`schedule_type`, `jobs.status`, `job_executions.status`,
@@ -209,5 +259,5 @@ Scoped out deliberately, not forgotten (tracked in `docs/backlog.md`):
 
 ## Open decisions
 
-Tracked in [`backlog.md`](backlog.md) → "Next major item 1: recurring jobs"
-(cron library, template pinning for recurring jobs, generator lookahead).
+None for recurring jobs; everything else is tracked in
+[`backlog.md`](backlog.md).

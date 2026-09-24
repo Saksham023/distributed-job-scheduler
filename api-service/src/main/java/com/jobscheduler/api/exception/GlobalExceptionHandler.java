@@ -34,8 +34,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred.");
     }
 
-    @ExceptionHandler(ParamsValidationException.class)
-    public ProblemDetail handleParamsValidation(ParamsValidationException ex) {
+    @ExceptionHandler(RequestValidationException.class)
+    public ProblemDetail handleRequestValidation(RequestValidationException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Request validation failed.");
         problem.setProperty("errors", ex.getViolations());
         return problem;

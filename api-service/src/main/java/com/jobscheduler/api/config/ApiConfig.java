@@ -6,7 +6,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
 @Configuration
-@EnableConfigurationProperties(FastPathProperties.class)
+@EnableConfigurationProperties({FastPathProperties.class, RecurringProperties.class})
 @Import(SqsPublisherConfig.class)
 public class ApiConfig {
 }

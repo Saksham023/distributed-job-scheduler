@@ -1,16 +1,17 @@
-package com.jobscheduler.common.model;
+package com.jobscheduler.api.dto;
+
+import com.jobscheduler.common.model.JobExecutionStatus;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-public record JobExecution(
+public record ExecutionResponse(
         UUID id,
-        UUID jobId,
         OffsetDateTime scheduledAt,
         JobExecutionStatus status,
-        Integer attempt,
+        int attempt,
         String errorMessage,
         OffsetDateTime startedAt,
-        OffsetDateTime finishedAt,
-        OffsetDateTime createdAt
-) {}
+        OffsetDateTime finishedAt
+) {
+}
