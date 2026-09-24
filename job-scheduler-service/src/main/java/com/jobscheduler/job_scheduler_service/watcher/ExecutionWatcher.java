@@ -15,6 +15,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.time.Duration;
 
 @Component
 @ConditionalOnProperty(name = "app.watcher.enabled", havingValue = "true")
@@ -39,6 +40,7 @@ public class ExecutionWatcher {
 
     @Scheduled(fixedDelayString = "${app.watcher.interval}")
     public void publishDueExecutions() {
+        long startNanos = System.nanoTime();
         int totalQueued = 0;
         try {
             while (true) {
@@ -59,7 +61,8 @@ public class ExecutionWatcher {
         }
 
         if (totalQueued > 0) {
-            log.info("Watcher run queued {} executions", totalQueued);
+            long elapsedMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
+            log.info("Watcher run queued {} executions in {} ms", totalQueued, elapsedMs);
         }
     }
 

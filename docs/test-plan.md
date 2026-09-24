@@ -221,6 +221,37 @@ Notes from the run:
   request wait the pool's 30s default before failing: shorter pool timeout in
   the backlog.
 
+## Burst test: 2,000 jobs due at the same instant (run 2026-09-24)
+
+Measures watcher publish time and worker drain time when everything falls due
+at once. `dev/sql/07_burst_test.sql` inserts N jobs with one `scheduled_at`
+(T >= 8 min ahead, so one watcher run publishes them all at T - 5 min);
+`dev/sql/08_burst_test_results.sql` reports drain time, lateness percentiles
+and a throughput curve. Run from the terminal with `-Xmx512m` per JVM, API not
+needed (migrations already applied).
+
+| | 1 watcher, 1 worker | 1 watcher, 2 workers |
+|---|---|---|
+| Watcher publish (2,000) | 14.4 s | 11.4 s |
+| Last job finished after T | 15.1 s | 8.0 s |
+| Drain rate | ~125/s | ~227/s |
+| Start lateness p50 / p95 / max | 7.0 / 14.2 / 15.0 s | 3.5 / 7.4 / 8.0 s |
+| Processing per job (claim → complete) | 15 ms | 19 ms |
+| Result | 2,000 `COMPLETED`, attempt 1, 2,000 emails, 0 errors | same |
+
+Findings:
+
+- **A worker is network-bound, not CPU-bound.** Each job takes ~15 ms of
+  work, but a worker handles at most 10 messages at a time (Spring Cloud AWS
+  default) and polls the next 10 when those finish: ~80 ms per cycle, of which
+  ~65 ms is the SQS round trip (laptop → `ap-south-1`). Hence the near-2×
+  gain from a second worker. Levers: more workers, or raise
+  `maxConcurrentMessages` per worker (both in the backlog).
+- **Watcher publish** is ~70 ms per batch of 10, dominated by the SQS call;
+  varies run to run with internet latency (14.4 s vs 11.4 s, same code).
+- **Jobs start up to ~0.9 s early**: `DelaySeconds` is whole seconds and is
+  rounded down (backlog).
+
 ## After testing
 
 Stop all processes, run `06_reset_jobs.sql`, clear Mailpit, purge both queues,

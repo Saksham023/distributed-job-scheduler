@@ -28,3 +28,5 @@ Scripts to run **by hand** against the **local** database (e.g. from DataGrip).
 | `04_cleanup_load_test.sql` | Deletes the rows created by `03` (purge the SQS queue separately) |
 | `05_test_results.sql` | Read-only checks after a test: statuses, attempts, errors, unfinished work, execution/job mismatches |
 | `06_reset_jobs.sql` | Empties all job data (keeps task types, templates, users) for a clean test run |
+| `07_burst_test.sql` | Inserts N jobs all due at one instant (psql variables `due_at`, `n`) for the burst test |
+| `08_burst_test_results.sql` | Read-only: drain time, start lateness percentiles, throughput per 5 s after a burst test |

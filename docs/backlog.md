@@ -88,6 +88,20 @@ Build:
       fields, never rename/remove), since old and new versions run side by
       side during deploys.
 
+## Performance (only if measured to be needed)
+
+Baseline from the burst test (`test-plan.md`): watcher ~140–175 msgs/s,
+worker ~125 jobs/s each, both limited by SQS round trips from a laptop.
+- [ ] Run close to AWS (same region as SQS and the DB): round trips drop from
+      tens of ms to ~1–3 ms; the biggest single gain, no code change.
+- [ ] Worker concurrency: tune `maxConcurrentMessages` / `maxMessagesPerPoll`
+      (default 10) per worker, sized with the DB pool and mail provider limits.
+- [ ] Watcher: parallel batches (several threads, each its own lock → send →
+      update transaction), or lock 100 rows and send 10 `SendMessageBatch`
+      calls concurrently. Only if more watcher instances aren't enough.
+- [ ] Round the SQS delay **up** instead of down, so a job never starts before
+      its `scheduled_at` (observed up to ~0.9 s early).
+
 ## Templates
 
 - [ ] Plain-text alternative alongside the HTML body (some clients prefer it;
