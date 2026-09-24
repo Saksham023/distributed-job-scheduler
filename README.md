@@ -194,6 +194,8 @@ emails.
 - [Test plan and results](docs/test-plan.md)
 - [Stress and chaos test report](docs/stress-test-report.md): 125,000 jobs,
   workers killed every minute
+- [Performance report](docs/performance-report.md): that test's numbers per
+  worker, per step, per minute and per burst
 - [Backlog](docs/backlog.md): what's planned next
 
 ## Roadmap

@@ -3,6 +3,9 @@
 **Run:** 2026-09-24, 22:06–22:26 IST, on a laptop (16 GB RAM, 10 cores),
 with Postgres and Mailpit in Docker and real Amazon SQS (`ap-south-1`).
 
+**Numbers at a glance** (per worker, per step, per minute, per burst, per
+watcher run): [`performance-report.md`](performance-report.md).
+
 **Verdict:** 125,000 emails, 0 failures, 0 duplicate emails and 0 errors,
 while workers were killed with `kill -9` every minute. The system recovered
 on its own every time.

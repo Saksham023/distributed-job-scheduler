@@ -141,7 +141,10 @@ created 4–5, the watcher published them, 5 emails on time, job `COMPLETED`).
 - [`docs/test-plan.md`](docs/test-plan.md) — end-to-end test plan and the
   results of the last run.
 - [`docs/stress-test-report.md`](docs/stress-test-report.md) — 125,000-job
-  stress and chaos test: metrics per service, recovery, findings.
+  stress and chaos test: design, recovery, findings.
+- [`docs/performance-report.md`](docs/performance-report.md) — the same
+  test's numbers only: per worker, per step, per minute, bursts, watcher and
+  generator runs, resources.
 - [`docs/backlog.md`](docs/backlog.md) — everything still to do, grouped;
   when something is postponed, add it there; when it's done, mark it.
 - [`docs/notes/`](docs/notes/) — concept notes for revision (enum vs lookup
