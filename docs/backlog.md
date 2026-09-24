@@ -132,6 +132,12 @@ worker ~125 jobs/s each, both limited by SQS round trips from a laptop.
 - [ ] Watcher: parallel batches (several threads, each its own lock → send →
       update transaction), or lock 100 rows and send 10 `SendMessageBatch`
       calls concurrently. Only if more watcher instances aren't enough.
+- [ ] Faster crash recovery: today it takes two visibility timeouts (~120 s,
+      `stress-test-report.md` §7). Setting the message's visibility to 0 after
+      the `PROCESSING` reset gives ~60 s but removes the margin for a
+      slow-but-alive worker; do it together with the heartbeat below.
+- [ ] Connection budget: size Hikari pools per service (or add PgBouncer);
+      12 services × the default 10 connections exceed Postgres's 100.
 - [ ] Round the SQS delay **up** instead of down, so a job never starts before
       its `scheduled_at` (observed up to ~0.9 s early).
 

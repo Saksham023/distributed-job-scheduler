@@ -180,6 +180,11 @@ load test with multiple watchers and workers, duplicate messages, the mail
 server going down, bad data, crashed and killed processes, and a database
 outage. Every scenario recovered on its own without restarts or data loss.
 
+A [stress and chaos test](docs/stress-test-report.md) ran 125,000 jobs in 10
+minutes (including 10,000 due in the same second) while workers were killed
+with `kill -9` every minute: all completed, with no failures and no duplicate
+emails.
+
 ## Documentation
 
 - [Schema design](docs/schema.md): tables, and the reasoning behind each
@@ -187,6 +192,8 @@ outage. Every scenario recovered on its own without restarts or data loss.
 - [Infrastructure](docs/infrastructure.md): SQS, watcher, worker and failure
   handling in detail
 - [Test plan and results](docs/test-plan.md)
+- [Stress and chaos test report](docs/stress-test-report.md): 125,000 jobs,
+  workers killed every minute
 - [Backlog](docs/backlog.md): what's planned next
 
 ## Roadmap

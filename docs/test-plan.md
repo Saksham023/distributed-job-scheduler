@@ -254,6 +254,14 @@ Findings:
 - **Jobs start up to ~0.9 s early**: `DelaySeconds` is whole seconds and is
   rounded down (backlog).
 
+## Stress and chaos test (run 2026-09-24)
+
+125,000 executions in 10 minutes (steady, 10,000-job bursts and 2,500
+every-minute recurring jobs), 8 workers / 3 watchers / 1 generator, with
+workers killed with `kill -9` every minute: 0 failures, 0 duplicate emails, 0
+errors. Full setup, metrics and findings:
+[`stress-test-report.md`](stress-test-report.md).
+
 ## After testing
 
 Stop all processes, run `06_reset_jobs.sql`, clear Mailpit, purge both queues,
